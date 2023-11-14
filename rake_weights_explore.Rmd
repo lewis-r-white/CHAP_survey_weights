@@ -1,0 +1,1124 @@
+---
+title: "Survey Weights"
+author: "Lewis White"
+date: "2023-10-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## load libraries
+```{r}
+library(tidyverse)
+library(survey)
+```
+
+## Set working directory 
+```{r}
+setwd("/Users/lewiswhite/CHAP_columbia/CHAP_survey_weights")
+```
+
+## Loading in the data
+```{r}
+#includes the weights from Linnea and Flavio's V4 weights 
+GL_EA_weights <- read_csv("weight_2010_full_results.csv")
+
+#responses to the survey
+demographics <- read_csv("Demographics dataset.csv")
+
+#cooking survey
+primary_secondary_cooking <- read_csv("Primary and secondary cooking practices dataset.csv")
+```
+
+## Recalculating Linnea and Flavio's weights in R
+```{r}
+LW_EA_weights <- GL_EA_weights %>%
+  select(!prob_1:weight_2010) %>% #remove weighting variables 
+  mutate(ea_select_prob = eas_selected/eas_2010, #Prob select the cluster (EA)
+         hh_select_within_ea_prob = 20/ea_hhs_2010) %>% #Prob select HH within each EA
+  mutate(hh_select_prob = ea_select_prob * hh_select_within_ea_prob) %>% #prob select HH 
+  mutate(weight = 1/hh_select_prob) #obtain weight
+```
+
+## Joining the demographic and cooking data 
+```{r}
+survey_with_weights <- left_join(demographics, LW_EA_weights, by = c("eacode", "region")) %>%
+  filter(!is.na(weight))
+
+full_survey <- left_join(survey_with_weights, primary_secondary_cooking, by = "hh_id") %>%
+  
+  #add LPG main cookstove column
+  mutate(LPG_main = ifelse(primary_cookstove == "Gas:(LPG)/cooking gas stove", "Yes", "No")) %>%
+  
+  #add charcoal main cookstove column
+  mutate(charcoal_main = ifelse(primary_cookstove == "3-stone stove/open fire" | primary_cookstove == "Charcoal stove", "Yes", "No")) %>%
+  
+  #change NA values in charcoal/lpg main to "No". These respondents skipped over this question bc they don't cook
+  mutate(LPG_main = coalesce(LPG_main, "No"),
+         charcoal_main = coalesce(charcoal_main, "No"))
+```
+
+## Exploring a few key variables
+```{r}
+#Select all the cookstoves used in this HH: cookstove 4 = LPG
+primary_secondary_cooking %>% group_by(cookstove4) %>% count()
+
+#Select all the cookstoves used in this HH: cookstove 8 = Charcoal
+primary_secondary_cooking %>% group_by(cookstove8) %>% count()
+
+#primary cookstoves 
+primary_secondary_cooking %>% group_by(primary_cookstove) %>% summarise(n = n()) %>%
+  mutate(percent = round(n / sum(n), 2))
+```
+
+
+## Setting up the survey design 
+```{r}
+# Survey design using survey package
+survey_design <- svydesign(id=~eacode, #specify clusters 
+                           fpc= ~fpc, #include finite population correction (GL and FM calculations)
+                           weights= ~weight, #specify the survey weights
+                           strata= ~region, #specify the region strata
+                           data=full_survey)
+```
+
+
+# Applying the survey design to estimate population values
+
+### Total number of poeple 
+```{r}
+survey::svytotal(c(rep(1, nrow(survey_with_weights))), survey_design)
+```
+
+### Household size calculations
+```{r}
+svymean(~total_hh_num, design = survey_design, na.rm = TRUE)
+
+# Calculate weighted means for "total_hh_num" by urban/rural
+
+#urban household size
+urban_sub_orig <- subset(survey_design, urban_rural == 1)
+svymean(~total_hh_num, design = urban_sub_orig, na.rm = TRUE)
+confint(svymean(~total_hh_num, design = urban_sub_orig, na.rm = TRUE))
+
+#rural household size
+rural_sub_orig <- subset(survey_design, urban_rural == 2)
+svymean(~total_hh_num, design = rural_sub_orig, na.rm = TRUE)
+confint(svymean(~total_hh_num, design = rural_sub_orig, na.rm = TRUE))
+```
+
+### urban / rural divide 
+```{r}
+# Calculate the table of urban and rural population
+urban_rural_table <- svytable(~urban_rural, design = survey_design)
+
+# Convert the result to a data frame
+as.data.frame(urban_rural_table) %>%
+  mutate(urban_rural = ifelse(urban_rural == 1, "Urban", "Rural")) %>%
+  mutate(percent_freq = Freq / sum(Freq))
+```
+
+### stove type use 
+```{r}
+svytotal(~primary_cookstove, survey_design, na.rm = TRUE) %>% 
+  as.data.frame() %>%
+  mutate(percent = round(total / sum(total) * 100, 2))
+
+#Variables of interest                                          total.        pct   
+# primary_cookstove3-stone stove/open fire                    1983755.5401   28.74
+# primary_cookstoveCharcoal stove                             2589164.4110   37.51
+# primary_cookstoveGas:(LPG)/cooking gas stove                2281835.4507   33.05
+```
+
+
+# BEGIN RAKING 1
+
+```{r}
+#specify the initial survey design again
+survey_design <- svydesign(id=~eacode, #specify clusters 
+                           fpc= ~fpc, #include finite population correction
+                           weights= ~weight, #specify the survey weights
+                           strata= ~region, #specify the region strata
+                           data=full_survey)
+
+# Create a replicate-weights survey design object from a traditional strata/cluster survey design object (necessary for raking I believe)
+replicate_survey_design <- as.svrepdesign(survey_design)
+
+
+# SPECIFY POPULATION TOTALS 
+#specify 2021 population urban/rural values 
+pop.urban_rural_str <- data.frame(urban_rural_str=c("urban", "rural"), Freq=c(5090702, 3254711))
+
+#specify 2021 population LPG main values 
+pop.LPG_main <- data.frame(LPG_main = c("Yes", "No"), Freq = c(3079458, 5265956))
+
+#specify 2021 population chacoal main values 
+pop.charcoal_main <- data.frame(charcoal_main = c("Yes", "No"), Freq = c(4531560, 3813854))
+
+
+#COMPLETE THE RAKING PROCESS 
+#apply raking to get the urban/rural population values to be correct 
+raked_surv <- rake(replicate_survey_design, list(~urban_rural_str, ~LPG_main, ~charcoal_main), list(pop.urban_rural_str, pop.LPG_main, pop.charcoal_main))
+
+
+#Raking does NOT appear to work with svymean ----
+
+#svymean(~total_hh_num, design = replicate_survey_design, na.rm = TRUE)
+#pop.total_hh_num <- data.frame(total_hh_num=c(3.6))
+
+# raked_surv <- rake(replicate_survey_design, list(~urban_rural_str, ~total_hh_num), list(pop.urban_rural_str, pop.total_hh_num))
+```
+
+## National Population Results from Raked Survey
+
+```{r}
+#total population
+survey::svytotal(c(rep(1, nrow(full_survey))), raked_surv)
+
+#urban/rural totals
+svytotal(~urban_rural_str, design = raked_surv, na.rm = TRUE)
+
+#region hh populations 
+svytotal(~region, design = raked_surv, na.rm = TRUE)
+
+#mean hh members
+svymean(~total_hh_num, design = raked_surv, na.rm = TRUE)
+
+#LPG main stove
+svytotal(~LPG_main, design = raked_surv)
+
+#charcoal main stove
+svytotal(~charcoal_main, design = raked_surv)
+
+
+#URBAN
+#urban subset 
+urban_sub <- subset(raked_surv, urban_rural == 1)
+
+#urban hh size
+svymean(~total_hh_num, design = urban_sub, na.rm = TRUE)
+
+#urban LPG primary stove 
+svytotal(~LPG_main, design = urban_sub, na.rm = TRUE)
+
+#RURAL
+#rural subset
+rural_sub <- subset(raked_surv, urban_rural == 2)
+
+# rural hh size 
+svymean(~total_hh_num, design = rural_sub, na.rm = TRUE)
+
+# rural LPG primary stove
+svytotal(~LPG_main, design = rural_sub, na.rm = TRUE)
+
+
+#Greater Accra LPG
+accra_sub <- subset(raked_surv, region == "Greater Accra")
+svytotal(~LPG_main, design = accra_sub, na.rm = TRUE)
+
+#Ashanti LPG
+ashanti_sub <- subset(raked_surv, region == "Ashanti")
+svytotal(~LPG_main, design = ashanti_sub, na.rm = TRUE)
+```
+
+## Regional results: comparing original weights to raked weights 
+
+```{r}
+# Create data frame from GSS regional populations and districts report 
+region <- c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West")
+
+number_of_households <- c(621349, 838493, 1702160, 491373, 881328, 1523101, 240086, 152801, 317994, 288725, 174031, 437934, 133114, 108088, 264404, 190193)
+
+rural_households <- c( 292842, 344366, 123225, 277898, 413370, 566043,
+  162918, 73304, 120206, 123162, 112719, 201727, 89556, 69922, 189290, 129218
+)
+
+urban_households <- c(328507, 494127, 1578935, 213475, 467958, 957058,
+  77168, 79497, 197788, 165563, 61312, 236207, 43558, 38166, 75114, 60975
+)
+
+average_household_size <- c(3.3, 3.3, 3.2, 3.3, 3.2, 3.4, 3.6, 3.6, 3.7, 4.1, 4.2, 5.2, 4.9, 6.0, 4.8, 4.6)
+
+# Create the dataframe
+GSS_df <- data.frame(region = region, 
+                 number_hh = number_of_households, 
+                 urban_households = urban_households, 
+                 rural_households = rural_households, 
+                 hhsize = average_household_size) %>%
+  arrange((region)) %>%
+  mutate(pct_rural = round(rural_households/(urban_households + rural_households), 3) *100)
+  
+
+# Display the dataframe
+GSS_df
+```
+
+
+```{r}
+#RAKED ESTIMATES
+#region hh populations 
+raked_region_hh_pop <- svytotal(~region, design = raked_surv, na.rm = TRUE) %>%
+  as.data.frame() %>%
+  select(-SE)
+
+#household size by region
+raked_hh_size <- svyby(~total_hh_num, by = ~region, design = raked_surv, FUN = svymean, na.rm = TRUE) %>%
+  as.data.frame() 
+
+#urban households
+raked_urban_hh <- svytotal(~region, design = urban_sub, na.rm = TRUE) %>%
+  as.data.frame() %>%
+  rename(urban_hh = total) %>%
+  select(-SE)
+
+#rural households
+raked_rural_hh <- svytotal(~region, design = rural_sub, na.rm = TRUE) %>%
+  as.data.frame() %>%
+  rename(rural_hh = total) %>%
+  select(-SE)
+
+#combine 
+bind_cols(GSS_df, raked_region_hh_pop) %>%
+  bind_cols(raked_hh_size) %>%
+  bind_cols(raked_rural_hh) %>%
+  bind_cols(raked_urban_hh) %>%
+  mutate(rake_pct_rural = round(rural_hh / (urban_hh + rural_hh), 3) *100) 
+
+
+
+
+
+#ORIGINAL ESTIMATES
+#region hh populations 
+original_region_hh_pop <- svytotal(~region, design = survey_design, na.rm = TRUE) %>%
+  as.data.frame()
+
+#household size by region
+original_hh_size <- svyby(~total_hh_num, by = ~region, design = survey_design, FUN = svymean, na.rm = TRUE) %>%
+  as.data.frame()
+
+
+
+#urban households
+orig_urban_hh <- svytotal(~region, design = urban_sub_orig, na.rm = TRUE) %>%
+  as.data.frame() %>%
+  rename(urban_hh = total) %>%
+  select(-SE)
+
+#rural households
+orig_raked_rural_hh <- svytotal(~region, design = rural_sub_orig, na.rm = TRUE) %>%
+  as.data.frame() %>%
+  rename(rural_hh = total) %>%
+  select(-SE)
+
+
+#combine 
+bind_cols(GSS_df, original_hh_size) %>%
+  bind_cols(original_region_hh_pop) %>%
+  bind_cols(orig_raked_rural_hh) %>%
+  bind_cols(orig_urban_hh) %>%
+  mutate(orig_pct_rural = round(rural_hh / (urban_hh + rural_hh), 3) * 100)
+```
+
+
+## graphing new weights compared to old weights
+
+```{r}
+#Identify new weights from raking process
+raked_weights <- raked_surv$pweights
+
+#add new weights to full dataframe
+survey_all_weights <- bind_cols(survey_with_weights, raked_weights) %>%
+  rename("rake_weight" = "...58") %>%
+  mutate(weight_diff = rake_weight - weight,
+         weight_ratio = rake_weight / weight)
+
+#plot distribution of original weights 
+ggplot(data = survey_all_weights, aes(x = weight)) +
+  geom_histogram(bins = 30, fill = "skyblue", color = "black") +
+  stat_bin(aes(y=after_stat(count), label=after_stat(count)), geom="text", vjust=-.5) +
+  theme_minimal() +
+  labs(
+    title = "Original Weights Histogram",
+    x = "Original Weights",
+    y = "Frequency"
+  ) +
+  scale_x_continuous(
+    breaks = seq(0, 19000, by = 1000),  # Adjust the breaks as needed
+    labels = seq(0, 19000, by = 1000)   # Labels for the breaks
+  )
+
+#plot distribution of new weights 
+ggplot(data = survey_all_weights, aes(x = rake_weight)) +
+  geom_histogram(bins = 30, fill = "skyblue", color = "black") +
+  stat_bin(aes(y=after_stat(count), label=after_stat(count)), geom="text", vjust=-.5) +
+  theme_minimal() +
+  labs(
+    title = "Raked Weights Histogram",
+    x = "Raked Weights",
+    y = "Frequency"
+  ) +
+  scale_x_continuous(
+    breaks = seq(0, 19000, by = 1000),  # Adjust the breaks as needed
+    labels = seq(0, 19000, by = 1000)   # Labels for the breaks
+  )
+
+#plot distribution of the difference in weights 
+ggplot(data = survey_all_weights, aes(x = weight_diff)) +
+  geom_histogram(bins = 30, fill = "skyblue", color = "black") +
+  stat_bin(aes(y=after_stat(count), label=after_stat(count)), geom="text", vjust=-.5) +
+  theme_minimal() +
+  labs(
+    title = "Weight Difference Histogram",
+    x = "Weight Difference (Raked Weight - Pre Weight)",
+    y = "Frequency"
+  ) +
+  scale_x_continuous(
+    breaks = seq(-3000, 15000, by = 1000),  # Adjust the breaks as needed
+    labels = seq(-3000, 15000, by = 1000)   # Labels for the breaks
+  )
+
+
+#check the ratio values  
+survey_all_weights %>%
+  mutate(weight_ratio = round(weight_ratio, 2)) %>%
+  group_by(weight_ratio) %>%
+  count()
+
+
+
+#creating a table of how much the weights changed
+survey_all_weights <- survey_all_weights %>%
+  mutate(weight_range = case_when(
+    weight_diff < -1000 ~ "< -1000",
+    between(weight_diff, -1000, -500) ~ "-1000 to -500",
+    between(weight_diff, -500, 0) ~ "-500 to 0",
+    between(weight_diff, 0, 500) ~ "0 to 500",
+    between(weight_diff, 500, 1000) ~ "500 to 1000",
+    between(weight_diff, 1000, 2000) ~ "1000 to 2000",
+    between(weight_diff, 2000, 5000) ~ "2000 to 5000",
+    weight_diff > 5000 ~ "> 5000",
+    TRUE ~ "Other"
+  ))
+
+# Count the number of observations in each category
+survey_all_weights %>%
+  group_by(weight_range) %>%
+  summarize(count = n()) %>%
+  arrange(desc(count))
+```
+
+## explore largest weights
+```{r}
+#they all have NA or weird primary cookstoves 
+
+large_weights <- survey_all_weights %>%
+  filter(weight_ratio > 3) %>%
+  left_join(primary_secondary_cooking) %>%
+  select(region, eaname.x, urban_rural_str, ea_hhs_2010, weight, rake_weight, primary_cookstove)
+```
+
+
+
+# BEGIN RAKING 2: INCLUDE REGIONAL HOUSEHOLD POPULATION 
+
+```{r}
+#specify the initial survey design again
+survey_design <- svydesign(id=~eacode, #specify clusters 
+                           fpc= ~fpc, #include finite population correction
+                           weights= ~weight, #specify the survey weights
+                           strata= ~region, #specify the region strata
+                           data=full_survey)
+
+# Create a replicate-weights survey design object from a traditional strata/cluster survey design object (necessary for raking I believe)
+replicate_survey_design <- as.svrepdesign(survey_design)
+
+
+# SPECIFY POPULATION TOTALS 
+#specify 2021 population urban/rural values 
+pop.urban_rural_str <- data.frame(urban_rural_str=c("urban", "rural"), Freq=c(5090702, 3254711))
+
+#specify 2021 population LPG main values 
+pop.LPG_main <- data.frame(LPG_main = c("Yes", "No"), Freq = c(3079458, 5265956))
+
+#specify 2021 population chacoal main values 
+pop.charcoal_main <- data.frame(charcoal_main = c("Yes", "No"), Freq = c(4531560, 3813854))
+
+#regional 2021 HH populations 
+pop.region_hh <- data.frame(
+  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
+  Freq = c(621349, 838493, 1702160, 491373, 881328, 1523101, 240086, 152801, 317994, 288725, 174031, 437934, 133114, 108088, 264404, 190193))
+
+
+
+
+#COMPLETE THE RAKING PROCESS 
+#apply raking to get the urban/rural population values to be correct 
+raked_surv <- rake(replicate_survey_design, list(~urban_rural_str, ~LPG_main, ~charcoal_main, ~region), list(pop.urban_rural_str, pop.LPG_main, pop.charcoal_main, pop.region_hh))
+
+```
+
+## National Population Results from Raked Survey
+
+```{r}
+#total population
+survey::svytotal(c(rep(1, nrow(full_survey))), raked_surv)
+
+#urban/rural totals
+svytotal(~urban_rural_str, design = raked_surv, na.rm = TRUE)
+
+#region hh populations 
+svytotal(~region, design = raked_surv, na.rm = TRUE)
+
+#mean hh members
+svymean(~total_hh_num, design = raked_surv, na.rm = TRUE)
+
+#LPG main stove
+svytotal(~LPG_main, design = raked_surv)
+
+#charcoal main stove
+svytotal(~charcoal_main, design = raked_surv)
+
+
+#URBAN
+#urban subset 
+urban_sub <- subset(raked_surv, urban_rural == 1)
+
+#urban hh size
+svymean(~total_hh_num, design = urban_sub, na.rm = TRUE)
+
+#urban LPG primary stove 
+svytotal(~LPG_main, design = urban_sub, na.rm = TRUE)
+
+#RURAL
+#rural subset
+rural_sub <- subset(raked_surv, urban_rural == 2)
+
+# rural hh size 
+svymean(~total_hh_num, design = rural_sub, na.rm = TRUE)
+
+# rural LPG primary stove
+svytotal(~LPG_main, design = rural_sub, na.rm = TRUE)
+
+
+#Greater Accra LPG
+accra_sub <- subset(raked_surv, region == "Greater Accra")
+svytotal(~LPG_main, design = accra_sub, na.rm = TRUE)
+
+#Ashanti LPG
+ashanti_sub <- subset(raked_surv, region == "Ashanti")
+svytotal(~LPG_main, design = ashanti_sub, na.rm = TRUE)
+```
+ 
+## Regional results: comparing original weights to raked weights 
+
+```{r}
+# Create data frame from GSS regional populations and districts report 
+region <- c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West")
+
+number_of_households <- c(621349, 838493, 1702160, 491373, 881328, 1523101, 240086, 152801, 317994, 288725, 174031, 437934, 133114, 108088, 264404, 190193)
+
+rural_households <- c( 292842, 344366, 123225, 277898, 413370, 566043,
+  162918, 73304, 120206, 123162, 112719, 201727, 89556, 69922, 189290, 129218
+)
+
+urban_households <- c(328507, 494127, 1578935, 213475, 467958, 957058,
+  77168, 79497, 197788, 165563, 61312, 236207, 43558, 38166, 75114, 60975
+)
+
+average_household_size <- c(3.3, 3.3, 3.2, 3.3, 3.2, 3.4, 3.6, 3.6, 3.7, 4.1, 4.2, 5.2, 4.9, 6.0, 4.8, 4.6)
+
+# Create the dataframe
+GSS_df <- data.frame(region = region, 
+                 number_hh = number_of_households, 
+                 urban_households = urban_households, 
+                 rural_households = rural_households, 
+                 hhsize = average_household_size) %>%
+  arrange((region)) %>%
+  mutate(pct_rural = round(rural_households/(urban_households + rural_households), 3) *100)
+  
+
+# Display the dataframe
+GSS_df
+```
+
+
+```{r}
+#RAKED ESTIMATES
+#region hh populations 
+raked_region_hh_pop <- svytotal(~region, design = raked_surv, na.rm = TRUE) %>%
+  as.data.frame() %>%
+  select(-SE)
+
+#household size by region
+raked_hh_size <- svyby(~total_hh_num, by = ~region, design = raked_surv, FUN = svymean, na.rm = TRUE) %>%
+  as.data.frame() 
+
+#urban households
+raked_urban_hh <- svytotal(~region, design = urban_sub, na.rm = TRUE) %>%
+  as.data.frame() %>%
+  rename(urban_hh = total) %>%
+  select(-SE)
+
+#rural households
+raked_rural_hh <- svytotal(~region, design = rural_sub, na.rm = TRUE) %>%
+  as.data.frame() %>%
+  rename(rural_hh = total) %>%
+  select(-SE)
+
+#combine 
+bind_cols(GSS_df, raked_region_hh_pop) %>%
+  bind_cols(raked_hh_size) %>%
+  bind_cols(raked_rural_hh) %>%
+  bind_cols(raked_urban_hh) %>%
+  mutate(rake_pct_rural = round(rural_hh / (urban_hh + rural_hh), 3) *100) 
+`
+
+
+
+
+#ORIGINAL ESTIMATES
+#region hh populations 
+original_region_hh_pop <- svytotal(~region, design = survey_design, na.rm = TRUE) %>%
+  as.data.frame()
+
+#household size by region
+original_hh_size <- svyby(~total_hh_num, by = ~region, design = survey_design, FUN = svymean, na.rm = TRUE) %>%
+  as.data.frame()
+
+
+
+#urban households
+orig_urban_hh <- svytotal(~region, design = urban_sub_orig, na.rm = TRUE) %>%
+  as.data.frame() %>%
+  rename(urban_hh = total) %>%
+  select(-SE)
+
+#rural households
+orig_raked_rural_hh <- svytotal(~region, design = rural_sub_orig, na.rm = TRUE) %>%
+  as.data.frame() %>%
+  rename(rural_hh = total) %>%
+  select(-SE)
+
+
+#combine 
+bind_cols(GSS_df, original_hh_size) %>%
+  bind_cols(original_region_hh_pop) %>%
+  bind_cols(orig_raked_rural_hh) %>%
+  bind_cols(orig_urban_hh) %>%
+  mutate(orig_pct_rural = round(rural_hh / (urban_hh + rural_hh), 3) * 100)
+```
+
+## graphing new weights compared to old weights
+
+```{r}
+#Identify new weights from raking process
+raked_weights <- raked_surv$pweights
+
+#add new weights to full dataframe
+survey_all_weights <- bind_cols(survey_with_weights, raked_weights) %>%
+  rename("rake_weight" = "...58") %>%
+  mutate(weight_diff = rake_weight - weight,
+         weight_ratio = rake_weight / weight)
+
+#plot distribution of original weights 
+ggplot(data = survey_all_weights, aes(x = weight)) +
+  geom_histogram(bins = 30, fill = "skyblue", color = "black") +
+  stat_bin(aes(y=after_stat(count), label=after_stat(count)), geom="text", vjust=-.5) +
+  theme_minimal() +
+  labs(
+    title = "Original Weights Histogram",
+    x = "Original Weights",
+    y = "Frequency"
+  ) +
+  scale_x_continuous(
+    breaks = seq(0, 19000, by = 1000),  # Adjust the breaks as needed
+    labels = seq(0, 19000, by = 1000)   # Labels for the breaks
+  )
+
+#plot distribution of new weights 
+ggplot(data = survey_all_weights, aes(x = rake_weight)) +
+  geom_histogram(bins = 30, fill = "skyblue", color = "black") +
+  stat_bin(aes(y=after_stat(count), label=after_stat(count)), geom="text", vjust=-.5) +
+  theme_minimal() +
+  labs(
+    title = "Rake 2 Weights Histogram",
+    x = "Raked Weights",
+    y = "Frequency"
+  ) +
+  scale_x_continuous(
+    breaks = seq(0, 19000, by = 1000),  # Adjust the breaks as needed
+    labels = seq(0, 19000, by = 1000)   # Labels for the breaks
+  )
+
+#plot distribution of the difference in weights 
+ggplot(data = survey_all_weights, aes(x = weight_ratio)) +
+  geom_histogram(bins = 30, fill = "skyblue", color = "black") +
+  stat_bin(aes(y=after_stat(count), label=after_stat(count)), geom="text", vjust=-.5) +
+  theme_minimal() +
+  labs(
+    title = "Weight Ratio Histogram",
+    x = "Weight Ratio (Rake 2 Weight / Pre Weight)",
+    y = "Frequency"
+  )
+
+#plot distribution of weight ratio
+ggplot(data = survey_all_weights, aes(x = weight_diff)) +
+  geom_histogram(bins = 30, fill = "skyblue", color = "black") +
+  stat_bin(aes(y=after_stat(count), label=after_stat(count)), geom="text", vjust=-.5) +
+  theme_minimal() +
+  labs(
+    title = "Weight 2 Difference Histogram",
+    x = "Weight 2 Difference (Rake 2 Weight - Pre Weight)",
+    y = "Frequency"
+  ) +
+  scale_x_continuous(
+    breaks = seq(-3000, 15000, by = 1000),  # Adjust the breaks as needed
+    labels = seq(-3000, 15000, by = 1000))   # Labels for the breaks
+
+
+#ratio of weights 
+  survey_all_weights %>%
+  mutate(weight_ratio = round(weight_ratio, 2)) %>%
+  group_by(weight_ratio) %>%
+  count()
+
+
+#creating a table of how much the weights changed
+survey_all_weights <- survey_all_weights %>%
+  mutate(weight_range = case_when(
+    weight_diff < -1000 ~ "< -1000",
+    between(weight_diff, -1000, -500) ~ "-1000 to -500",
+    between(weight_diff, -500, 0) ~ "-500 to 0",
+    between(weight_diff, 0, 500) ~ "0 to 500",
+    between(weight_diff, 500, 1000) ~ "500 to 1000",
+    between(weight_diff, 1000, 2000) ~ "1000 to 2000",
+    between(weight_diff, 2000, 5000) ~ "2000 to 5000",
+    weight_diff > 5000 ~ "> 5000",
+    TRUE ~ "Other"
+  ))
+
+# Count the number of observations in each category
+survey_all_weights %>%
+  group_by(weight_range) %>%
+  summarize(count = n()) %>%
+  arrange(desc(count))
+```
+
+## explore largest weights
+```{r}
+#they all have NA or weird primary cookstoves 
+
+large_weights <- survey_all_weights %>%
+  filter(weight_ratio > 3) %>%
+  left_join(primary_secondary_cooking) %>%
+  select(region, eaname.x, urban_rural_str, ea_hhs_2010, weight, rake_weight, primary_cookstove)
+```
+
+
+
+
+
+
+
+
+
+
+
+# BEGIN RAKING 3: trying interaction of LPG and region
+
+
+## adjusting the data so format works with raking
+```{r}
+#collapse some of the regions so there are enough primary LPG users in each region ----
+full_survey_collapsed_regions <- full_survey %>%
+  mutate(collapsed_region = case_when(
+  region == "Western" | region == "Western North" ~ "west_west_north",
+  region %in% c("Upper East", "Upper West", "North East", 
+                "Northern", "Savannah", "Oti") ~ "northern_regions",
+  region %in% c("Bono", "Bono East", "Ahafo") ~ "mid_west_regions",
+  TRUE ~ region))
+
+
+# SPECIFY POPULATION TOTALS ----
+#specify 2021 population urban/rural values 
+pop.urban_rural_str <- data.frame(urban_rural_str=c("urban", "rural"), Freq=c(5090702, 3254711))
+
+#specify 2021 population LPG main values 
+pop.LPG_main <- data.frame(LPG_main = c("Yes", "No"), Freq = c(3079458, 5265956))
+
+#specify 2021 population chacoal main values 
+pop.charcoal_main <- data.frame(charcoal_main = c("Yes", "No"), Freq = c(4531560, 3813854))
+
+#regional 2021 HH populations 
+pop.region_hh <- data.frame(
+  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
+  Freq = c(621349, 838493, 1702160, 491373, 881328, 1523101, 240086, 152801, 317994, 288725, 174031, 437934, 133114, 108088, 264404, 190193))
+
+# calculating LPG as main fuel for each region
+hh_pop = c(621349, 838493, 1702160, 491373, 881328, 1523101, 240086, 152801, 317994, 288725, 174031, 437934, 133114, 108088, 264404, 190193)
+
+LPG_percent = c(0.377, 0.371, 0.682, 0.337, 0.335, 0.381, 0.178, 0.205, 0.279, 0.167, 0.102, 0.104, 0.043, 0.042, 0.138, 0.120)
+
+LPG_main_region = round(hh_pop * LPG_percent, 0)
+
+
+pop.region_hh <- data.frame(
+  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
+  Freq = hh_pop,
+  LPG_percent = LPG_percent
+) %>%
+  mutate(LPG_yes = round(Freq*LPG_percent, 0),
+         LPG_no = round(Freq*(1-LPG_percent), 0)) %>%
+  select(region, LPG_yes, LPG_no) 
+
+
+# get population LPG usage for each region of the collapsed regions ----
+west_west_north <- pop.region_hh %>%
+  filter(region %in% c("Western", "Western North")) %>%
+  summarize(
+    region = "west_west_north",
+    LPG_yes = sum(LPG_yes),
+    LPG_no = sum(LPG_no)
+  )
+
+north_regions <- pop.region_hh %>%
+  filter(region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti")) %>%
+  summarize(
+    region = "northern_regions",
+    LPG_yes = sum(LPG_yes),
+    LPG_no = sum(LPG_no)
+  )
+
+midwest_regions <- pop.region_hh %>%
+  filter(region %in% c("Bono", "Bono East", "Ahafo")) %>%
+  summarize(
+    region = "mid_west_regions",
+    LPG_yes = sum(LPG_yes),
+    LPG_no = sum(LPG_no)
+  )
+
+#get dataset with all of the large regions that didn't need to be combined ----
+large_regions <- pop.region_hh %>%
+  filter(region %in% c("Eastern", "Central", "Greater Accra", "Ashanti", "Volta"))
+
+collapsed_region_hh <- bind_rows(west_west_north, north_regions, midwest_regions, large_regions)
+
+
+#Combine LPG yes/no columns with each row specifying which is applicable 
+pop_region_long <- collapsed_region_hh %>%
+  pivot_longer(cols = c(LPG_yes, LPG_no), names_to = "LPG_main", values_to = "Count")
+
+# Replace "LPG_yes" with "Yes" and "LPG_no" with "No"
+pop_region_long$LPG_main <- ifelse(pop_region_long$LPG_main == "LPG_yes", "Yes", "No")
+
+# reformat this data so each row is a household (necessary for creating pop.table below)
+pop_region_long <- pop_region_long %>%
+  uncount(Count) %>%
+  rename(collapsed_region = region)
+
+#create table of LPG main stove by collapsed regions
+pop.table_LPG <- xtabs(~collapsed_region+LPG_main, pop_region_long)
+```
+
+## Raking using the adjusted regional data
+```{r}
+#specify the initial survey design again ----
+survey_design <- svydesign(id=~eacode, #specify clusters 
+                           fpc= ~fpc, #include finite population correction
+                           weights= ~weight, #specify the survey weights
+                           strata= ~region, #specify the region strata
+                           data=full_survey_collapsed_regions)
+
+# Create a replicate-weights survey design object from a traditional strata/cluster survey design object (necessary for raking I believe)
+replicate_survey_design <- as.svrepdesign(survey_design)
+
+
+#complete the raking process (using LPG main fuel per region, urban/rural info)
+raked_surv <- rake(replicate_survey_design, list(~LPG_main+collapsed_region, ~urban_rural_str), list(pop.table_LPG, pop.urban_rural_str))
+```
+
+## Testing performance of the LPG region joint distribution weights 
+
+### National Population Results from Raked Survey
+
+```{r}
+#total population
+survey::svytotal(c(rep(1, nrow(full_survey))), raked_surv)
+
+#urban/rural totals
+svytotal(~urban_rural_str, design = raked_surv, na.rm = TRUE)
+
+#region hh populations 
+svytotal(~region, design = raked_surv, na.rm = TRUE)
+
+#mean hh members
+svymean(~total_hh_num, design = raked_surv, na.rm = TRUE)
+
+#LPG main stove
+svytotal(~LPG_main, design = raked_surv)
+
+#charcoal main stove
+svytotal(~charcoal_main, design = raked_surv)
+
+
+#URBAN
+#urban subset 
+urban_sub <- subset(raked_surv, urban_rural == 1)
+
+#urban hh size
+svymean(~total_hh_num, design = urban_sub, na.rm = TRUE)
+
+#urban LPG primary stove 
+svytotal(~LPG_main, design = urban_sub, na.rm = TRUE)
+
+#RURAL
+#rural subset
+rural_sub <- subset(raked_surv, urban_rural == 2)
+
+# rural hh size 
+svymean(~total_hh_num, design = rural_sub, na.rm = TRUE)
+
+# rural LPG primary stove
+svytotal(~LPG_main, design = rural_sub, na.rm = TRUE)
+
+
+#Greater Accra LPG
+accra_sub <- subset(raked_surv, region == "Greater Accra")
+svytotal(~LPG_main, design = accra_sub, na.rm = TRUE)
+
+#Ashanti LPG
+ashanti_sub <- subset(raked_surv, region == "Ashanti")
+svytotal(~LPG_main, design = ashanti_sub, na.rm = TRUE)
+```
+
+## regional estimates 
+```{r}
+#RAKED ESTIMATES
+#region hh populations 
+svytotal(~region, design = raked_surv, na.rm = TRUE) %>%
+  as.data.frame() %>%
+  select(-SE)
+
+#household size by region
+svyby(~total_hh_num, by = ~region, design = raked_surv, FUN = svymean, na.rm = TRUE) %>%
+  as.data.frame() 
+
+#urban households
+urban_hh <- svytotal(~region, design = urban_sub, na.rm = TRUE) %>%
+  as.data.frame() %>%
+  rename(urban_hh = total) %>%
+  select(-SE)
+
+#rural households
+rural_hh <- svytotal(~region, design = rural_sub, na.rm = TRUE) %>%
+  as.data.frame() %>%
+  rename(rural_hh = total) %>%
+  select(-SE)
+
+bind_cols(urban_hh, rural_hh) %>%
+  as.data.frame() %>%
+  mutate(pct_rural = rural_hh/(rural_hh + urban_hh) * 100)
+```
+
+
+## graphing new weights compared to old weights
+
+```{r}
+#Identify new weights from raking process
+raked_weights <- raked_surv$pweights
+
+#add new weights to full dataframe
+survey_all_weights <- bind_cols(survey_with_weights, raked_weights) %>%
+  rename("rake_weight" = "...58") %>%
+  mutate(weight_diff = rake_weight - weight,
+         weight_ratio = rake_weight / weight)
+
+#plot distribution of original weights 
+ggplot(data = survey_all_weights, aes(x = weight)) +
+  geom_histogram(bins = 30, fill = "skyblue", color = "black") +
+  stat_bin(aes(y=after_stat(count), label=after_stat(count)), geom="text", vjust=-.5) +
+  theme_minimal() +
+  labs(
+    title = "Original Weights Histogram",
+    x = "Original Weights",
+    y = "Frequency"
+  ) +
+  scale_x_continuous(
+    breaks = seq(0, 19000, by = 1000),  # Adjust the breaks as needed
+    labels = seq(0, 19000, by = 1000)   # Labels for the breaks
+  )
+
+#plot distribution of new weights 
+ggplot(data = survey_all_weights, aes(x = rake_weight)) +
+  geom_histogram(bins = 30, fill = "skyblue", color = "black") +
+  stat_bin(aes(y=after_stat(count), label=after_stat(count)), geom="text", vjust=-.5) +
+  theme_minimal() +
+  labs(
+    title = "Rake 3 Weights Histogram",
+    x = "Rake 3 Weights",
+    y = "Frequency"
+  ) +
+  scale_x_continuous(
+    breaks = seq(0, 19000, by = 1000),  # Adjust the breaks as needed
+    labels = seq(0, 19000, by = 1000)   # Labels for the breaks
+  )
+
+#plot distribution of the difference in weights 
+ggplot(data = survey_all_weights, aes(x = weight_diff)) +
+  geom_histogram(bins = 30, fill = "skyblue", color = "black") +
+  stat_bin(aes(y=after_stat(count), label=after_stat(count)), geom="text", vjust=-.5) +
+  theme_minimal() +
+  labs(
+    title = "Weight 3 Difference Histogram",
+    x = "Weight 3 Difference (Rake 3 Weight - Pre Weight)",
+    y = "Frequency"
+  ) +
+  scale_x_continuous(
+    breaks = seq(-3000, 15000, by = 1000),  # Adjust the breaks as needed
+    labels = seq(-3000, 15000, by = 1000)   # Labels for the breaks
+  )
+
+#plot distribution of weight ratio
+ggplot(data = survey_all_weights, aes(y = weight_ratio)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(
+    title = "Weight Ratio Boxplot",
+    x = "",
+    y = "Ratio of Weights"
+  ) +
+  scale_x_continuous(labels = NULL)
+
+
+#boxplot ratio of weights 
+  survey_all_weights %>%
+  mutate(weight_ratio = round(weight_ratio, 2)) %>%
+  group_by(weight_ratio) %>%
+  count()
+
+
+#creating a table of how much the weights changed
+survey_all_weights <- survey_all_weights %>%
+  mutate(weight_range = case_when(
+    weight_diff < -1000 ~ "< -1000",
+    between(weight_diff, -1000, -500) ~ "-1000 to -500",
+    between(weight_diff, -500, 0) ~ "-500 to 0",
+    between(weight_diff, 0, 500) ~ "0 to 500",
+    between(weight_diff, 500, 1000) ~ "500 to 1000",
+    between(weight_diff, 1000, 2000) ~ "1000 to 2000",
+    between(weight_diff, 2000, 5000) ~ "2000 to 5000",
+    weight_diff > 5000 ~ "> 5000",
+    TRUE ~ "Other"
+  ))
+
+# Count the number of observations in each category
+survey_all_weights %>%
+  group_by(weight_range) %>%
+  summarize(count = n()) %>%
+  arrange(desc(count))
+```
+
+## explore largest weights
+```{r}
+#they all have NA or weird primary cookstoves 
+
+large_weights <- survey_all_weights %>%
+  filter(weight_ratio > 3) %>%
+  left_join(primary_secondary_cooking) %>%
+  select(region, eaname.x, urban_rural_str, ea_hhs_2010, weight, rake_weight, primary_cookstove)
+```
+
+
+# RAKE 4: Regional urban/rural and regional primary fuel type
+```{r}
+svyby(~urban_rural_str, by = ~region, design = raked_surv, FUN = svytotal, na.rm = TRUE) %>%
+  as.data.frame() 
+```
+
+```{r}
+#collapse some of the regions so there are enough primary LPG users in each region ----
+full_survey_collapsed_regions <- full_survey %>%
+  mutate(collapsed_region = case_when(
+  region == "Western" | region == "Western North" ~ "west_west_north",
+  region %in% c("Upper East", "Upper West", "North East", 
+                "Northern", "Savannah", "Oti") ~ "northern_regions",
+  region %in% c("Bono", "Bono East", "Ahafo") ~ "mid_west_regions",
+  TRUE ~ region))
+
+
+
+#regional 2021 HH populations 
+pop.region_urban_rural_hh <- data.frame(
+  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
+  rural = c(292842, 344366, 123225, 277898, 413370, 566043,
+  162918, 73304, 120206, 123162, 112719, 201727, 89556, 69922, 189290, 129218),
+  urban = c(328507, 494127, 1578935, 213475, 467958, 957058,
+  77168, 79497, 197788, 165563, 61312, 236207, 43558, 38166, 75114, 60975))
+
+
+# get population LPG usage for each region of the collapsed regions ----
+west_west_north <- pop.region_urban_rural_hh %>%
+  filter(region %in% c("Western", "Western North")) %>%
+  summarize(
+    region = "west_west_north",
+    urban = sum(urban),
+    rural = sum(rural)
+  )
+
+north_regions <- pop.region_urban_rural_hh %>%
+  filter(region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti")) %>%
+  summarize(
+    region = "northern_regions",
+    urban = sum(urban),
+    rural = sum(rural)
+  )
+
+midwest_regions <- pop.region_urban_rural_hh %>%
+  filter(region %in% c("Bono", "Bono East", "Ahafo")) %>%
+  summarize(
+    region = "mid_west_regions",
+    urban = sum(urban),
+    rural = sum(rural)
+  )
+
+#get dataset with all of the large regions that didn't need to be combined ----
+large_regions <- pop.region_urban_rural_hh %>%
+  filter(region %in% c("Eastern", "Central", "Greater Accra", "Ashanti", "Volta"))
+
+collapsed_region_urban_rural_hh <- bind_rows(west_west_north, north_regions, midwest_regions, large_regions)
+
+
+
+
+#Combine LPG yes/no columns with each row specifying which is applicable 
+pop_region_urban_rural_long <- collapsed_region_urban_rural_hh %>%
+  pivot_longer(cols = c(rural, urban), names_to = "urban_rural_str", values_to = "Count") #names need to match what is in the survey!!
+
+# reformat this data so each row is a household (necessary for creating pop.table below)
+pop_region_urban_rural_long <- pop_region_urban_rural_long %>%
+  uncount(Count) %>%
+  rename(collapsed_region = region)
+
+#create table of LPG main stove by collapsed regions
+pop.table_urban_rural <- xtabs(~collapsed_region+urban_rural_str, pop_region_urban_rural_long)
+```
+
+## Raking using the adjusted regional data
+```{r}
+#specify the initial survey design again ----
+survey_design <- svydesign(id=~eacode, #specify clusters 
+                           fpc= ~fpc, #include finite population correction
+                           weights= ~weight, #specify the survey weights
+                           strata= ~region, #specify the region strata
+                           data=full_survey_collapsed_regions)
+
+# Create a replicate-weights survey design object from a traditional strata/cluster survey design object (necessary for raking I believe)
+replicate_survey_design <- as.svrepdesign(survey_design)
+
+
+#complete the raking process (using LPG main fuel per region, urban/rural info)
+raked_surv <- rake(replicate_survey_design, list(~urban_rural_str+collapsed_region, ~LPG_main+collapsed_region), list(pop.table_urban_rural, pop.table_LPG))
+```
