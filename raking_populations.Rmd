@@ -12,6 +12,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ## load libraries
 ```{r}
 library(tidyverse)
+library(here)
 library(survey)
 ```
 
@@ -30,6 +31,9 @@ if (Sys.getenv('USER') == "lewiswhite") {
   
   #cooking survey
   primary_secondary_cooking <- read_csv("Primary and secondary cooking practices dataset.csv")
+  
+  #house structure
+  house_structure <- read_csv("House structure (non randomized).csv")
      
 }
 
@@ -73,7 +77,12 @@ full_survey <- left_join(survey_with_weights, primary_secondary_cooking, by = "h
   
   #change NA values in charcoal/lpg main to "No". These respondents skipped over this question bc they don't cook
   mutate(LPG_main = coalesce(LPG_main, "No"),
-         CW_main = coalesce(CW_main, "No"))
+         CW_main = coalesce(CW_main, "No")) %>%
+  
+  #add in house structure data
+  left_join(house_structure)
+
+
 ```
 
 ## Adding collapsed region and collapsd primary cooking type 
@@ -434,7 +443,7 @@ survey_design <- svydesign(id=~eacode, #specify clusters
 
 #summary(weights(survey_design))
 
-# Create a replicate-weights survey design object from a traditional strata/cluster survey design object
+# Create a replicate-weights survey design object from a traditional strata/cluster survey design object. Doesn't appear to work with weight trimming. 
 replicate_survey_design <- as.svrepdesign(survey_design)
 
 #summary(weights(replicate_survey_design, type = "sampling"))
@@ -444,16 +453,17 @@ replicate_survey_design <- as.svrepdesign(survey_design)
 ```{r}
 #raked_surv <- rake(replicate_survey_design, list(~urban_rural_str, ~LPG_main, ~CW_main), list(pop.urban_rural_str, pop.LPG_main, pop.CW_main))
 
-raked_surv <- rake(survey_design, list(~urban_rural_str, ~LPG_main, ~CW_main), list(pop.urban_rural_str, pop.LPG_main, pop.CW_main))
+raked_surv <- rake(survey_design, list(~urban_rural_str, ~LPG_main, ~CW_main), list(pop.urban_rural_str, pop.LPG_main, pop.CW_main), control = list(maxit = 38, epsilon = 1))
 
 summary(weights(raked_surv, type = "sampling"))
 ```
 
 ## trimming thr weights
 ```{r}
-#Set up weight trimming
+upper_weight <- mean(weights(raked_surv, type = "sampling")) * 5
 
-trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=5647,
+#Set up weight trimming
+trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
                                    strict = TRUE)
 
 #CHECK OUT RESULTS 
@@ -555,7 +565,17 @@ survey_all_weights %>%
                     labels = c("rake_weight" = "Raked Weight", 
                                "weight" = "Original Weights")) 
 
+
+
+
+#create df with hh_id and weights to be exported
+survey_all_weights_1 <- survey_all_weights %>% select(hh_id, rake_weight) %>%
+  mutate(rake_method = 1)
+
+# Write the tibble to a CSV file
+write_csv(survey_all_weights_1, "rake_1_weights.csv")
 ```
+
 
 
 
@@ -565,9 +585,11 @@ survey_all_weights %>%
 ```{r}
 #raked_surv <- rake(replicate_survey_design, list(~urban_rural_str, ~LPG_main, ~CW_main, ~region), list(pop.urban_rural_str, pop.LPG_main, pop.CW_main, pop.region_hh))
 
-raked_surv <- rake(survey_design, list(~urban_rural_str, ~LPG_main, ~CW_main, ~region), list(pop.urban_rural_str, pop.LPG_main, pop.CW_main, pop.region_hh))
+raked_surv <- rake(survey_design, list(~urban_rural_str, ~LPG_main, ~CW_main, ~region), list(pop.urban_rural_str, pop.LPG_main, pop.CW_main, pop.region_hh), control = list(maxit = 40, epsilon = 1))
 
-trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=5647,
+upper_weight <- mean(weights(raked_surv, type = "sampling")) * 5
+
+trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
                                    strict = TRUE)
 ```
 
@@ -575,24 +597,24 @@ trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=5647,
 
 ```{r}
 #total population
-survey::svytotal(c(rep(1, nrow(full_survey))), raked_surv)
+survey::svytotal(c(rep(1, nrow(full_survey))), trimmed_raked_surv)
 
 #urban/rural totals
-svytotal(~urban_rural_str, design = raked_surv, na.rm = TRUE)
+svytotal(~urban_rural_str, design = trimmed_raked_surv, na.rm = TRUE)
 
 #region hh populations 
-svytotal(~region, design = raked_surv, na.rm = TRUE)
+svytotal(~region, design = trimmed_raked_surv, na.rm = TRUE)
 
 #mean hh members
-svymean(~total_hh_num, design = raked_surv, na.rm = TRUE)
+svymean(~total_hh_num, design = trimmed_raked_surv, na.rm = TRUE)
 
 #LPG main stove
-svytotal(~collapsed_fuel, design = raked_surv)
+svytotal(~collapsed_fuel, design = trimmed_raked_surv)
 
 
 #URBAN
 #urban subset 
-urban_sub <- subset(raked_surv, urban_rural == 1)
+urban_sub <- subset(trimmed_raked_surv, urban_rural == 1)
 
 #urban hh size
 svymean(~total_hh_num, design = urban_sub, na.rm = TRUE)
@@ -603,7 +625,7 @@ svytotal(~collapsed_fuel, design = urban_sub, na.rm = TRUE)
 
 #RURAL
 #rural subset
-rural_sub <- subset(raked_surv, urban_rural == 2)
+rural_sub <- subset(trimmed_raked_surv, urban_rural == 2)
 
 # rural hh size 
 svymean(~total_hh_num, design = rural_sub, na.rm = TRUE)
@@ -613,11 +635,11 @@ svytotal(~collapsed_fuel, design = rural_sub, na.rm = TRUE)
 
 
 #Greater Accra LPG
-accra_sub <- subset(raked_surv, region == "Greater Accra")
+accra_sub <- subset(trimmed_raked_surv, region == "Greater Accra")
 svytotal(~collapsed_fuel, design = accra_sub, na.rm = TRUE)
 
 #Ashanti LPG
-ashanti_sub <- subset(raked_surv, region == "Ashanti")
+ashanti_sub <- subset(trimmed_raked_surv, region == "Ashanti")
 svytotal(~collapsed_fuel, design = ashanti_sub, na.rm = TRUE)
 ```
 
@@ -648,6 +670,12 @@ survey_all_weights %>%
                     labels = c("rake_weight" = "Raked Weight", 
                                "weight" = "Original Weights")) 
 
+#create df with hh_id and weights to be exported
+survey_all_weights_2 <- survey_all_weights %>% select(hh_id, rake_weight) %>%
+  mutate(rake_method = 2)
+
+# Write the tibble to a CSV file
+write_csv(survey_all_weights_2, "rake_2_weights.csv")
 ```
 
 
@@ -658,7 +686,9 @@ survey_all_weights %>%
 
 raked_surv <- rake(survey_design, list(~LPG_main+collapsed_region, ~urban_rural_str), list(pop.table_LPG, pop.urban_rural_str))
 
-trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=5647,
+upper_weight <- mean(weights(raked_surv, type = "sampling")) * 5
+
+trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
                                    strict = TRUE)
 
 ```
@@ -667,24 +697,24 @@ trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=5647,
 
 ```{r}
 #total population
-survey::svytotal(c(rep(1, nrow(full_survey))), raked_surv)
+survey::svytotal(c(rep(1, nrow(full_survey))), trimmed_raked_surv)
 
 #urban/rural totals
-svytotal(~urban_rural_str, design = raked_surv, na.rm = TRUE)
+svytotal(~urban_rural_str, design = trimmed_raked_surv, na.rm = TRUE)
 
 #region hh populations 
-svytotal(~region, design = raked_surv, na.rm = TRUE)
+svytotal(~region, design = trimmed_raked_surv, na.rm = TRUE)
 
 #mean hh members
-svymean(~total_hh_num, design = raked_surv, na.rm = TRUE)
+svymean(~total_hh_num, design = trimmed_raked_surv, na.rm = TRUE)
 
 #LPG main stove
-svytotal(~collapsed_fuel, design = raked_surv)
+svytotal(~collapsed_fuel, design = trimmed_raked_surv)
 
 
 #URBAN
 #urban subset 
-urban_sub <- subset(raked_surv, urban_rural == 1)
+urban_sub <- subset(trimmed_raked_surv, urban_rural == 1)
 
 #urban hh size
 svymean(~total_hh_num, design = urban_sub, na.rm = TRUE)
@@ -695,7 +725,7 @@ svytotal(~collapsed_fuel, design = urban_sub, na.rm = TRUE)
 
 #RURAL
 #rural subset
-rural_sub <- subset(raked_surv, urban_rural == 2)
+rural_sub <- subset(trimmed_raked_surv, urban_rural == 2)
 
 # rural hh size 
 svymean(~total_hh_num, design = rural_sub, na.rm = TRUE)
@@ -705,11 +735,11 @@ svytotal(~collapsed_fuel, design = rural_sub, na.rm = TRUE)
 
 
 #Greater Accra LPG
-accra_sub <- subset(raked_surv, region == "Greater Accra")
+accra_sub <- subset(trimmed_raked_surv, region == "Greater Accra")
 svytotal(~collapsed_fuel, design = accra_sub, na.rm = TRUE)
 
 #Ashanti LPG
-ashanti_sub <- subset(raked_surv, region == "Ashanti")
+ashanti_sub <- subset(trimmed_raked_surv, region == "Ashanti")
 svytotal(~collapsed_fuel, design = ashanti_sub, na.rm = TRUE)
 ```
 
@@ -740,6 +770,12 @@ survey_all_weights %>%
                     labels = c("rake_weight" = "Raked Weight", 
                                "weight" = "Original Weights")) 
 
+#create df with hh_id and weights to be exported
+survey_all_weights_3 <- survey_all_weights %>% select(hh_id, rake_weight) %>%
+  mutate(rake_method = 3)
+
+# Write the tibble to a CSV file
+write_csv(survey_all_weights_3, "rake_3_weights.csv")
 ```
 
 
@@ -753,9 +789,11 @@ survey_all_weights %>%
 
 raked_surv <- rake(survey_design, 
                    list(~urban_rural_str+collapsed_region, ~collapsed_region+collapsed_fuel), 
-                   list(pop.table_urban_rural, pop.table_primary_fuel))
+                   list(pop.table_urban_rural, pop.table_primary_fuel), control = list(maxit = 15, epsilon = 1))
 
-trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=5647,
+upper_weight <- mean(weights(raked_surv, type = "sampling")) * 5
+
+trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
                                    strict = TRUE)
 ```
 
@@ -807,6 +845,13 @@ svytotal(~collapsed_fuel, design = accra_sub, na.rm = TRUE)
 #Ashanti LPG
 ashanti_sub <- subset(trimmed_raked_surv, region == "Ashanti")
 svytotal(~collapsed_fuel, design = ashanti_sub, na.rm = TRUE)
+
+
+#check out hh structures
+svytotal(~hh_water_source, design = trimmed_raked_surv, na.rm = TRUE)
+
+svymean(~house_rooms, design = trimmed_raked_surv, na.rm = TRUE)
+
 ```
 
 ## Examine new weights from Rake 4
@@ -836,9 +881,124 @@ survey_all_weights %>%
                     labels = c("rake_weight" = "Raked Weight", 
                                "weight" = "Original Weights")) 
 
+#create df with hh_id and weights to be exported
+survey_all_weights_4 <- survey_all_weights %>% select(hh_id, rake_weight) %>%
+  mutate(rake_method = 4)
+
+# Write the tibble to a CSV file
+write_csv(survey_all_weights_4, "rake_4_weights.csv")
 ```
 
-# RAKE 5 AND RAKE 6 IN THE anesrake_version.Rmd doc. 
+# RAKE 5 see anesrake doc
+
+# RAKE 5b
+
+```{r}
+#raked_surv <- rake(replicate_survey_design, list(~urban_rural_str, ~LPG_main, ~CW_main, ~region), list(pop.urban_rural_str, pop.LPG_main, pop.CW_main, pop.region_hh))
+
+raked_surv <- rake(survey_design, list(~urban_rural_str, ~collapsed_fuel, ~region), list(pop.urban_rural_str, pop.primary_fuel, pop.region_hh), control = list(maxit = 20, epsilon = 1, verbose = FALSE))
+
+upper_weight <- mean(weights(raked_surv, type = "sampling")) * 5
+
+trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
+                                   strict = TRUE)
+```
+
+## National Population Results from Rake 5b
+
+```{r}
+#total population
+survey::svytotal(c(rep(1, nrow(full_survey))), trimmed_raked_surv)
+
+#urban/rural totals
+svytotal(~urban_rural_str, design = trimmed_raked_surv, na.rm = TRUE, deff = TRUE)
+
+#region hh populations 
+svytotal(~region, design = trimmed_raked_surv, na.rm = TRUE)
+
+#mean hh members
+svymean(~total_hh_num, design = trimmed_raked_surv, na.rm = TRUE, deff = TRUE)
+
+#LPG main stove
+svytotal(~collapsed_fuel, design = trimmed_raked_surv, deff = TRUE)
+
+
+#URBAN
+#urban subset 
+urban_sub <- subset(trimmed_raked_surv, urban_rural == 1)
+
+#urban hh size
+svymean(~total_hh_num, design = urban_sub, na.rm = TRUE)
+
+#urban LPG primary stove 
+svytotal(~collapsed_fuel, design = urban_sub, na.rm = TRUE)
+
+
+#RURAL
+#rural subset
+rural_sub <- subset(trimmed_raked_surv, urban_rural == 2)
+
+# rural hh size 
+svymean(~total_hh_num, design = rural_sub, na.rm = TRUE)
+
+# rural LPG primary stove
+svytotal(~collapsed_fuel, design = rural_sub, na.rm = TRUE)
+
+
+#Greater Accra LPG
+accra_sub <- subset(trimmed_raked_surv, region == "Greater Accra")
+svytotal(~collapsed_fuel, design = accra_sub, na.rm = TRUE)
+
+#Ashanti LPG
+ashanti_sub <- subset(trimmed_raked_surv, region == "Ashanti")
+svytotal(~collapsed_fuel, design = ashanti_sub, na.rm = TRUE)
+
+
+#check out hh structures
+svytotal(~hh_water_source, design = trimmed_raked_surv, na.rm = TRUE)
+svytotal(~hh_water_source, design = survey_design, na.rm = TRUE)
+
+svymean(~house_rooms, design = trimmed_raked_surv, na.rm = TRUE)
+svymean(~house_rooms, design = survey_design, na.rm = TRUE)
+```
+
+## Examine new weights from Rake 5b
+
+```{r}
+#Identify new weights from raking process
+raked_weights <- weights(trimmed_raked_surv, type = "sampling")
+
+#add new weights to full dataframe
+survey_all_weights <- bind_cols(survey_with_weights, raked_weights) %>%
+  rename("rake_weight" = "...58") %>%
+  mutate(weight_diff = rake_weight - weight,
+         weight_ratio = rake_weight / weight)
+
+#graphing the original weights with the comparison
+survey_all_weights %>%
+  pivot_longer(cols = c(weight, rake_weight), names_to = "Variable", values_to = "Value") %>%
+  ggplot(aes(x = Value, fill = Variable)) +
+  geom_histogram(bins = 30, position = "identity", alpha = 0.6) +
+  labs(title = "Histogram of Weights: Rake 5b",
+       x = "Survey Weight",
+       y = "Frequency",
+       fill = "Weight Origin") +
+  theme_bw() +
+  scale_fill_manual(values = c("rake_weight" = "#a8605d", 
+                               "weight" = "#7fabc7"),
+                    labels = c("rake_weight" = "Raked Weight", 
+                               "weight" = "Original Weights")) 
+
+#create df with hh_id and weights to be exported
+survey_all_weights_5b <- survey_all_weights %>% select(hh_id, rake_weight) %>%
+  mutate(rake_method = 5)
+
+# Write the tibble to a CSV file
+write_csv(survey_all_weights_5b, "rake_5b_weights.csv")
+```
+
+
+# RAKE 6 IN THE anesrake_version.Rmd doc. 
 
 
 # RAKE 7
@@ -854,11 +1014,234 @@ raked_surv <- rake(survey_design,
                    list(pop.urban_rural_str, pop.region_hh)
                    )
 
-trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=5647,
+upper_weight <- mean(weights(raked_surv, type = "sampling")) * 5
+
+trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
                                    strict = TRUE)
 ```
 
 ## National Population Results from Rake 7
+
+```{r}
+#total population
+survey::svytotal(c(rep(1, nrow(full_survey))), trimmed_raked_surv)
+
+#urban/rural totals
+svytotal(~urban_rural_str, design = trimmed_raked_surv, na.rm = TRUE, deff = TRUE)
+
+#region hh populations 
+svytotal(~region, design = trimmed_raked_surv, na.rm = TRUE)
+
+#mean hh members
+svymean(~total_hh_num, design = trimmed_raked_surv, na.rm = TRUE)
+
+#LPG main stove
+svytotal(~collapsed_fuel, design = trimmed_raked_surv, deff = TRUE)
+
+
+#URBAN
+#urban subset 
+urban_sub <- subset(trimmed_raked_surv, urban_rural == 1)
+
+#urban hh size
+svymean(~total_hh_num, design = urban_sub, na.rm = TRUE)
+
+#urban LPG primary stove 
+svytotal(~collapsed_fuel, design = urban_sub, na.rm = TRUE)
+
+
+#RURAL
+#rural subset
+rural_sub <- subset(trimmed_raked_surv, urban_rural == 2)
+
+# rural hh size 
+svymean(~total_hh_num, design = rural_sub, na.rm = TRUE)
+
+# rural LPG primary stove
+svytotal(~collapsed_fuel, design = rural_sub, na.rm = TRUE)
+
+
+#Greater Accra LPG
+accra_sub <- subset(trimmed_raked_surv, region == "Greater Accra")
+svytotal(~collapsed_fuel, design = accra_sub, na.rm = TRUE)
+
+#Ashanti LPG
+ashanti_sub <- subset(trimmed_raked_surv, region == "Ashanti")
+svytotal(~collapsed_fuel, design = ashanti_sub, na.rm = TRUE)
+
+
+#check out hh structures
+svytotal(~hh_water_source, design = trimmed_raked_surv, na.rm = TRUE)
+
+svymean(~house_rooms, design = trimmed_raked_surv, na.rm = TRUE)
+```
+
+## Examine new weights from Rake 7
+
+```{r}
+#Identify new weights from raking process
+raked_weights <- weights(trimmed_raked_surv, type = "sampling")
+
+#add new weights to full dataframe
+survey_all_weights <- bind_cols(survey_with_weights, raked_weights) %>%
+  rename("rake_weight" = "...58") %>%
+  mutate(weight_diff = rake_weight - weight,
+         weight_ratio = rake_weight / weight)
+
+#graphing the original weights with the comparison
+survey_all_weights %>%
+  pivot_longer(cols = c(weight, rake_weight), names_to = "Variable", values_to = "Value") %>%
+  ggplot(aes(x = Value, fill = Variable)) +
+  geom_histogram(bins = 30, position = "identity", alpha = 0.6) +
+  labs(title = "Histogram of Weights: Rake 7",
+       x = "Survey Weight",
+       y = "Frequency",
+       fill = "Weight Origin") +
+  theme_bw() +
+  scale_fill_manual(values = c("rake_weight" = "#a8605d", 
+                               "weight" = "#7fabc7"),
+                    labels = c("rake_weight" = "Raked Weight", 
+                               "weight" = "Original Weights")) 
+
+#create df with hh_id and weights to be exported
+survey_all_weights_7 <- survey_all_weights %>% select(hh_id, rake_weight) %>%
+  mutate(rake_method = 7)
+
+# Write the tibble to a CSV file
+write_csv(survey_all_weights_7, "rake_7_weights.csv")
+```
+
+
+# RAKE 8
+
+```{r}
+raked_surv <- rake(survey_design, 
+                   list(~urban_rural_str+collapsed_region), 
+                   list(pop.table_urban_rural)
+                   )
+
+upper_weight <- mean(weights(raked_surv, type = "sampling")) * 5
+
+trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
+                                   strict = TRUE)
+```
+
+## National Population Results from Rake 8
+
+```{r}
+#total population
+survey::svytotal(c(rep(1, nrow(full_survey))), trimmed_raked_surv)
+
+#urban/rural totals
+svytotal(~urban_rural_str, design = trimmed_raked_surv, na.rm = TRUE)
+
+#region hh populations 
+svytotal(~region, design = trimmed_raked_surv, na.rm = TRUE)
+
+#mean hh members
+svymean(~total_hh_num, design = trimmed_raked_surv, na.rm = TRUE)
+
+#LPG main stove
+svytotal(~collapsed_fuel, design = trimmed_raked_surv)
+
+
+#URBAN
+#urban subset 
+urban_sub <- subset(trimmed_raked_surv, urban_rural == 1)
+
+#urban hh size
+svymean(~total_hh_num, design = urban_sub, na.rm = TRUE)
+
+#urban LPG primary stove 
+svytotal(~collapsed_fuel, design = urban_sub, na.rm = TRUE)
+
+
+#RURAL
+#rural subset
+rural_sub <- subset(trimmed_raked_surv, urban_rural == 2)
+
+# rural hh size 
+svymean(~total_hh_num, design = rural_sub, na.rm = TRUE)
+
+# rural LPG primary stove
+svytotal(~collapsed_fuel, design = rural_sub, na.rm = TRUE)
+
+
+#Greater Accra LPG
+accra_sub <- subset(trimmed_raked_surv, region == "Greater Accra")
+svytotal(~collapsed_fuel, design = accra_sub, na.rm = TRUE)
+
+#Ashanti LPG
+ashanti_sub <- subset(trimmed_raked_surv, region == "Ashanti")
+svytotal(~collapsed_fuel, design = ashanti_sub, na.rm = TRUE)
+
+
+#check out hh structures
+svytotal(~hh_water_source, design = trimmed_raked_surv, na.rm = TRUE)
+
+svymean(~house_rooms, design = trimmed_raked_surv, na.rm = TRUE)
+```
+
+## Examine new weights from Rake 8
+
+```{r}
+#Identify new weights from raking process
+raked_weights <- weights(trimmed_raked_surv, type = "sampling")
+
+#add new weights to full dataframe
+survey_all_weights <- bind_cols(survey_with_weights, raked_weights) %>%
+  rename("rake_weight" = "...58") %>%
+  mutate(weight_diff = rake_weight - weight,
+         weight_ratio = rake_weight / weight)
+
+#graphing the original weights with the comparison
+survey_all_weights %>%
+  pivot_longer(cols = c(weight, rake_weight), names_to = "Variable", values_to = "Value") %>%
+  ggplot(aes(x = Value, fill = Variable)) +
+  geom_histogram(bins = 30, position = "identity", alpha = 0.6) +
+  labs(title = "Histogram of Weights: Rake 8",
+       x = "Survey Weight",
+       y = "Frequency",
+       fill = "Weight Origin") +
+  theme_bw() +
+  scale_fill_manual(values = c("rake_weight" = "#a8605d", 
+                               "weight" = "#7fabc7"),
+                    labels = c("rake_weight" = "Raked Weight", 
+                               "weight" = "Original Weights")) 
+
+#create df with hh_id and weights to be exported
+survey_all_weights_8 <- survey_all_weights %>% select(hh_id, rake_weight) %>%
+  mutate(rake_method = 8)
+
+# Write the tibble to a CSV file
+write_csv(survey_all_weights_8, "rake_8_weights.csv")
+
+```
+
+
+
+
+# Rake 9 ~ starting with equal weights (i.e. don't use GL + FM calculated weights)
+
+```{r}
+#specify the initial survey design again
+survey_design <- svydesign(id=~eacode, #specify clusters 
+                          # fpc= ~fpc, #include finite population correction (GL and FM calculations)
+                          # weights= ~weight, #specify the survey weights
+                           strata= ~region, #specify the region strata
+                           data=full_survey_collapsed)
+```
+
+```{r}
+raked_surv <- rake(survey_design, list(~urban_rural_str, ~collapsed_fuel, ~region), list(pop.urban_rural_str, pop.primary_fuel, pop.region_hh), control = list(maxit = 15, epsilon = 1))
+
+upper_weight <- mean(weights(raked_surv, type = "sampling")) * 5
+
+trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
+                                   strict = TRUE)
+```
+
+## National Population Results from Rake 9
 
 ```{r}
 #total population
@@ -908,7 +1291,7 @@ ashanti_sub <- subset(trimmed_raked_surv, region == "Ashanti")
 svytotal(~collapsed_fuel, design = ashanti_sub, na.rm = TRUE)
 ```
 
-## Examine new weights from Rake 7
+## Examine new weights from Rake 9
 
 ```{r}
 #Identify new weights from raking process
@@ -925,7 +1308,7 @@ survey_all_weights %>%
   pivot_longer(cols = c(weight, rake_weight), names_to = "Variable", values_to = "Value") %>%
   ggplot(aes(x = Value, fill = Variable)) +
   geom_histogram(bins = 30, position = "identity", alpha = 0.6) +
-  labs(title = "Histogram of Weights: Rake 7",
+  labs(title = "Histogram of Weights: Rake 9",
        x = "Survey Weight",
        y = "Frequency",
        fill = "Weight Origin") +
@@ -934,4 +1317,134 @@ survey_all_weights %>%
                                "weight" = "#7fabc7"),
                     labels = c("rake_weight" = "Raked Weight", 
                                "weight" = "Original Weights")) 
+
+#create df with hh_id and weights to be exported
+survey_all_weights_9 <- survey_all_weights %>% select(hh_id, rake_weight) %>%
+  mutate(rake_method = 9)
+
+# Write the tibble to a CSV file
+write_csv(survey_all_weights_9, "rake_9_weights.csv")
 ```
+
+# Rake 10 ~ starting with equal weights (i.e. don't use GL + FM calculated weights)
+
+```{r}
+#specify the initial survey design again
+survey_design <- svydesign(id=~eacode, #specify clusters 
+                          # fpc= ~fpc, #include finite population correction (GL and FM calculations)
+                          # weights= ~weight, #specify the survey weights
+                           strata= ~region, #specify the region strata
+                           data=full_survey_collapsed)
+```
+
+```{r}
+raked_surv <- rake(survey_design, list(~urban_rural_str+collapsed_region), list(pop.table_urban_rural))
+
+upper_weight <- mean(weights(raked_surv, type = "sampling")) * 5
+
+trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
+                                   strict = TRUE)
+```
+
+## National Population Results from Rake 10
+
+```{r}
+#total population
+survey::svytotal(c(rep(1, nrow(full_survey))), trimmed_raked_surv)
+
+#urban/rural totals
+svytotal(~urban_rural_str, design = trimmed_raked_surv, na.rm = TRUE)
+
+#region hh populations 
+svytotal(~region, design = trimmed_raked_surv, na.rm = TRUE)
+
+#mean hh members
+svymean(~total_hh_num, design = trimmed_raked_surv, na.rm = TRUE)
+
+#LPG main stove
+svytotal(~collapsed_fuel, design = trimmed_raked_surv)
+
+
+#URBAN
+#urban subset 
+urban_sub <- subset(trimmed_raked_surv, urban_rural == 1)
+
+#urban hh size
+svymean(~total_hh_num, design = urban_sub, na.rm = TRUE)
+
+#urban LPG primary stove 
+svytotal(~collapsed_fuel, design = urban_sub, na.rm = TRUE)
+
+
+#RURAL
+#rural subset
+rural_sub <- subset(trimmed_raked_surv, urban_rural == 2)
+
+# rural hh size 
+svymean(~total_hh_num, design = rural_sub, na.rm = TRUE)
+
+# rural LPG primary stove
+svytotal(~collapsed_fuel, design = rural_sub, na.rm = TRUE)
+
+
+#Greater Accra LPG
+accra_sub <- subset(trimmed_raked_surv, region == "Greater Accra")
+svytotal(~collapsed_fuel, design = accra_sub, na.rm = TRUE)
+
+#Ashanti LPG
+ashanti_sub <- subset(trimmed_raked_surv, region == "Ashanti")
+svytotal(~collapsed_fuel, design = ashanti_sub, na.rm = TRUE)
+```
+
+## Examine new weights from Rake 10
+
+```{r}
+#Identify new weights from raking process
+raked_weights <- weights(trimmed_raked_surv, type = "sampling")
+
+#add new weights to full dataframe
+survey_all_weights <- bind_cols(survey_with_weights, raked_weights) %>%
+  rename("rake_weight" = "...58") %>%
+  mutate(weight_diff = rake_weight - weight,
+         weight_ratio = rake_weight / weight)
+
+#graphing the original weights with the comparison
+survey_all_weights %>%
+  pivot_longer(cols = c(weight, rake_weight), names_to = "Variable", values_to = "Value") %>%
+  ggplot(aes(x = Value, fill = Variable)) +
+  geom_histogram(bins = 30, position = "identity", alpha = 0.6) +
+  labs(title = "Histogram of Weights: Rake 10",
+       x = "Survey Weight",
+       y = "Frequency",
+       fill = "Weight Origin") +
+  theme_bw() +
+  scale_fill_manual(values = c("rake_weight" = "#a8605d", 
+                               "weight" = "#7fabc7"),
+                    labels = c("rake_weight" = "Raked Weight", 
+                               "weight" = "Original Weights")) 
+
+#create df with hh_id and weights to be exported
+survey_all_weights_10 <- survey_all_weights %>% select(hh_id, rake_weight) %>%
+  mutate(rake_method = 10)
+
+# Write the tibble to a CSV file
+write_csv(survey_all_weights_10, "rake_10_weights.csv")
+```
+
+
+
+# Joining all the weights together
+
+```{r}
+#bind all the dataframe together
+all_rake_weights <- bind_rows(survey_all_weights_1, survey_all_weights_2, survey_all_weights_3, survey_all_weights_4, survey_all_weights_5b, survey_all_weights_7, survey_all_weights_8, survey_all_weights_9, survey_all_weights_10)
+
+#reformat data 
+all_rake_weights_wide <- all_rake_weights %>%
+  pivot_wider(names_from = rake_method, values_from = rake_weight, names_prefix = "rake_method_")
+
+# Write to a CSV file
+write_csv(all_rake_weights_wide, "full_rake_weights.csv")
+
+```
+
