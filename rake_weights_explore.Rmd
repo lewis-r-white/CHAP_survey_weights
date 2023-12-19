@@ -20,6 +20,40 @@ library(survey)
 setwd("/Users/lewiswhite/CHAP_columbia/CHAP_survey_weights")
 ```
 
+
+```{r}
+if (Sys.getenv('USER') == "lewiswhite") {
+    
+  # set working directory
+  setwd("/Users/lewiswhite/CHAP_columbia/CHAP_survey_weights")
+  
+  #includes the weights from Linnea and Flavio's V4 weights 
+  GL_EA_weights <- read_csv("weight_2010_full_results.csv")
+  
+  #responses to the survey
+  demographics <- read_csv("Demographics dataset.csv")
+  
+  #cooking survey
+  primary_secondary_cooking <- read_csv("Primary and secondary cooking practices dataset.csv")
+  
+  #house structure
+  house_structure <- read_csv("House structure (non randomized).csv")
+     
+}
+
+if (Sys.getenv('USER') == "linneagraham") {
+
+  ROOT <- ("/Volumes/GoogleDrive-100807402805951836278/.shortcut-targets-by-id/1B0iSt7ZGnvhcH8p5MtZccbjg10Pho9qT/ColumbiaWorldProjectsGhana/03_Phase_1/01_Assessment_Household_Needs/")
+
+  GL_EA_weights <- read_csv(file.path(ROOT, "Survey Weights/output/weight_2010_full_results.csv"))
+
+  demographics <- read_csv(file.path(ROOT, "Public Use Dataset/Modules/Demographics dataset.csv"))
+  
+  primary_secondary_cooking <- read_csv(file.path(ROOT,"Public Use Dataset/Modules/Primary and secondary cooking practices dataset.csv"))
+}
+
+```
+
 ## Loading in the data
 ```{r}
 #includes the weights from Linnea and Flavio's V4 weights 
@@ -57,7 +91,10 @@ full_survey <- left_join(survey_with_weights, primary_secondary_cooking, by = "h
   
   #change NA values in charcoal/lpg main to "No". These respondents skipped over this question bc they don't cook
   mutate(LPG_main = coalesce(LPG_main, "No"),
-         charcoal_main = coalesce(charcoal_main, "No"))
+         charcoal_main = coalesce(charcoal_main, "No")) %>%
+  
+  #add in house structure data
+  left_join(house_structure)
 ```
 
 ## Exploring a few key variables
@@ -90,34 +127,55 @@ survey_design <- svydesign(id=~eacode, #specify clusters
 ### Total number of poeple 
 ```{r}
 survey::svytotal(c(rep(1, nrow(survey_with_weights))), survey_design)
+
+svytotal(~region, design = survey_design, na.rm = TRUE)
+
 ```
 
 ### Household size calculations
 ```{r}
 svymean(~total_hh_num, design = survey_design, na.rm = TRUE)
+confint(svymean(~total_hh_num, design = survey_design, na.rm = TRUE))
 
 # Calculate weighted means for "total_hh_num" by urban/rural
 
-#urban household size
+#urban
 urban_sub_orig <- subset(survey_design, urban_rural == 1)
 svymean(~total_hh_num, design = urban_sub_orig, na.rm = TRUE)
 confint(svymean(~total_hh_num, design = urban_sub_orig, na.rm = TRUE))
+confint(svytotal(~primary_cookstove, urban_sub_orig, na.rm = TRUE))
 
-#rural household size
+
+#rural 
 rural_sub_orig <- subset(survey_design, urban_rural == 2)
 svymean(~total_hh_num, design = rural_sub_orig, na.rm = TRUE)
 confint(svymean(~total_hh_num, design = rural_sub_orig, na.rm = TRUE))
+confint(svytotal(~primary_cookstove, rural_sub_orig, na.rm = TRUE))
+
+
+## ashanti and accra
+
+accra_sub <- subset(survey_design, region == "Greater Accra")
+
+confint(svytotal(~primary_cookstove, accra_sub, na.rm = TRUE))
+
+ashanti_sub <- subset(survey_design, region == "Ashanti")
+
+confint(svytotal(~primary_cookstove, ashanti_sub, na.rm = TRUE))
+
+
+#water source
+confint(svytotal(~hh_water_source, design = survey_design, na.rm = TRUE))
+
 ```
 
 ### urban / rural divide 
 ```{r}
 # Calculate the table of urban and rural population
-urban_rural_table <- svytable(~urban_rural, design = survey_design)
+svytotal(~urban_rural_str, design = survey_design, na.rm = TRUE)
+confint(svytotal(~urban_rural_str, design = survey_design, na.rm = TRUE))
 
-# Convert the result to a data frame
-as.data.frame(urban_rural_table) %>%
-  mutate(urban_rural = ifelse(urban_rural == 1, "Urban", "Rural")) %>%
-  mutate(percent_freq = Freq / sum(Freq))
+
 ```
 
 ### stove type use 
@@ -130,6 +188,10 @@ svytotal(~primary_cookstove, survey_design, na.rm = TRUE) %>%
 # primary_cookstove3-stone stove/open fire                    1983755.5401   28.74
 # primary_cookstoveCharcoal stove                             2589164.4110   37.51
 # primary_cookstoveGas:(LPG)/cooking gas stove                2281835.4507   33.05
+
+
+confint(svytotal(~primary_cookstove, survey_design, na.rm = TRUE))
+
 ```
 
 
@@ -1122,3 +1184,107 @@ replicate_survey_design <- as.svrepdesign(survey_design)
 #complete the raking process (using LPG main fuel per region, urban/rural info)
 raked_surv <- rake(replicate_survey_design, list(~urban_rural_str+collapsed_region, ~LPG_main+collapsed_region), list(pop.table_urban_rural, pop.table_LPG))
 ```
+
+
+
+
+
+
+
+```{r}
+primary_secondary_cooking %>% select(pstove_hrs, pstove_min) %>%
+  mutate(pstove_min_hours = pstove_min/60)
+
+cooking_times <- primary_secondary_cooking %>%
+  mutate(pstove_hrs = case_when(
+    pstove_hrs == "0" ~ 0,
+    pstove_hrs == "1" ~ 1,
+    pstove_hrs == "2" ~ 2,
+    pstove_hrs == "3" ~ 3,
+    pstove_hrs == "4" ~ 4,
+    pstove_hrs == "5" ~ 5,
+    pstove_hrs == "6" ~ 6,
+    pstove_hrs == "7+" ~ 7,
+    is.na(pstove_hrs) ~ NA
+  )) %>%
+  mutate(pstove_min_hours = pstove_min/60) %>%
+  mutate(pstove_total_hours = pstove_hrs + pstove_min_hours) %>%
+  mutate(pstove_sim_hrs = case_when(
+    pstove_sim_hrs == "0" ~ 0,
+    pstove_sim_hrs == "1" ~ 1,
+    pstove_sim_hrs == "2" ~ 2,
+    pstove_sim_hrs == "3" ~ 3,
+    pstove_sim_hrs == "4" ~ 4,
+    pstove_sim_hrs == "5" ~ 5,
+    pstove_sim_hrs == "6" ~ 6,
+    pstove_sim_hrs == "7" ~ 7,
+    pstove_sim_hrs == "8" ~ 8,
+    pstove_sim_hrs == "9" ~ 9,
+    pstove_sim_hrs == "10" ~ 10,
+    pstove_sim_hrs == "11" ~ 11,
+    pstove_sim_hrs == "12" ~ 12,
+    pstove_sim_hrs == "13" ~ 13,
+    pstove_sim_hrs == "14" ~ 14,
+    pstove_sim_hrs == "15" ~ 15,
+    pstove_sim_hrs == "16" ~ 16,
+    pstove_sim_hrs == "17" ~ 17,
+    pstove_sim_hrs == "18" ~ 18,
+    pstove_sim_hrs == "19" ~ 19,
+    pstove_sim_hrs == "20" ~ 20,
+    pstove_sim_hrs == "21" ~ 21,
+    pstove_sim_hrs == "22" ~ 22,
+    pstove_sim_hrs == "23" ~ 23,
+    pstove_sim_hrs == "24" ~ 24,
+    TRUE ~ NA
+  )) %>%
+  mutate(secstove_hrs = case_when(
+    secstove_hrs == "0" ~ 0,
+    secstove_hrs == "1" ~ 1,
+    secstove_hrs == "2" ~ 2,
+    secstove_hrs == "3" ~ 3,
+    secstove_hrs == "4" ~ 4,
+    secstove_hrs == "5" ~ 5,
+    secstove_hrs == "6" ~ 6,
+    secstove_hrs == "7+" ~ 7,
+    is.na(secstove_hrs) ~ NA
+  )) %>%
+  mutate(secstove_sim_hrs = case_when(
+    secstove_sim_hrs == "0" ~ 0,
+    secstove_sim_hrs == "1" ~ 1,
+    secstove_sim_hrs == "2" ~ 2,
+    secstove_sim_hrs == "3" ~ 3,
+    secstove_sim_hrs == "4" ~ 4,
+    secstove_sim_hrs == "5" ~ 5,
+    secstove_sim_hrs == "6" ~ 6,
+    secstove_sim_hrs == "7" ~ 7,
+    secstove_sim_hrs == "8" ~ 8,
+    secstove_sim_hrs == "9" ~ 9,
+    secstove_sim_hrs == "10" ~ 10,
+    secstove_sim_hrs == "11" ~ 11,
+    secstove_sim_hrs == "12" ~ 12,
+    secstove_sim_hrs == "13" ~ 13,
+    secstove_sim_hrs == "14" ~ 14,
+    secstove_sim_hrs == "15" ~ 15,
+    secstove_sim_hrs == "16" ~ 16,
+    secstove_sim_hrs == "17" ~ 17,
+    secstove_sim_hrs == "18" ~ 18,
+    secstove_sim_hrs == "19" ~ 19,
+    secstove_sim_hrs == "20" ~ 20,
+    secstove_sim_hrs == "21" ~ 21,
+    secstove_sim_hrs == "22" ~ 22,
+    secstove_sim_hrs == "23" ~ 23,
+    secstove_sim_hrs == "24" ~ 24,
+    TRUE ~ NA
+  )) 
+
+cooking_times %>%
+  filter(primary_cookstove == "Gas:(LPG)/cooking gas stove") %>%
+  summarise(mean_hours = mean(pstove_total_hours, na.rm = TRUE),
+            mean_sim = mean(pstove_sim_hrs, na.rm = TRUE),
+            sec_stove = mean(secstove_hrs, na.rm = TRUE),
+            sec_stove_sim = mean(secstove_sim_hrs, na.rm = TRUE))
+
+mean(cooking_times$pstove_total_hours, na.rm = TRUE)
+```
+
+
