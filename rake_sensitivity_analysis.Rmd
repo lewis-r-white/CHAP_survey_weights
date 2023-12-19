@@ -1,0 +1,1155 @@
+---
+title: "Raking Sensitivity Analysis"
+author: "Lewis White"
+date: "2023-12-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## load libraries
+```{r}
+library(tidyverse)
+library(here)
+library(survey)
+```
+
+## Set Paths
+```{r}
+if (Sys.getenv('USER') == "lewiswhite") {
+    
+  # set working directory
+  setwd("/Users/lewiswhite/CHAP_columbia/CHAP_survey_weights")
+  
+  #includes the weights from Linnea and Flavio's V4 weights 
+  GL_EA_weights <- read_csv("weight_2010_full_results.csv")
+  
+  #responses to the survey
+  demographics <- read_csv("Demographics dataset.csv")
+  
+  #cooking survey
+  primary_secondary_cooking <- read_csv("Primary and secondary cooking practices dataset.csv")
+  
+  #house structure
+  house_structure <- read_csv("House structure (non randomized).csv")
+     
+}
+
+if (Sys.getenv('USER') == "linneagraham") {
+
+  ROOT <- ("/Volumes/GoogleDrive-100807402805951836278/.shortcut-targets-by-id/1B0iSt7ZGnvhcH8p5MtZccbjg10Pho9qT/ColumbiaWorldProjectsGhana/03_Phase_1/01_Assessment_Household_Needs/")
+
+  GL_EA_weights <- read_csv(file.path(ROOT, "Survey Weights/output/weight_2010_full_results.csv"))
+
+  demographics <- read_csv(file.path(ROOT, "Public Use Dataset/Modules/Demographics dataset.csv"))
+  
+  primary_secondary_cooking <- read_csv(file.path(ROOT,"Public Use Dataset/Modules/Primary and secondary cooking practices dataset.csv"))
+}
+
+```
+
+## Recalculating Linnea and Flavio's weights in R
+```{r}
+LW_EA_weights <- GL_EA_weights %>%
+  select(!prob_1:weight_2010) %>% #remove weighting variables 
+  mutate(ea_select_prob = eas_selected/eas_2010, #Prob select the cluster (EA)
+         hh_select_within_ea_prob = 20/ea_hhs_2010) %>% #Prob select HH within each EA
+  mutate(hh_select_prob = ea_select_prob * hh_select_within_ea_prob) %>% #prob select HH 
+  mutate(weight = 1/hh_select_prob) #obtain weight
+```
+
+## Joining the demographic and cooking data 
+```{r}
+#join the weights to the demographic data
+survey_with_weights <- left_join(demographics, LW_EA_weights, by = c("eacode", "region")) %>%
+  filter(!is.na(weight))
+
+#add the cooking data
+full_survey <- left_join(survey_with_weights, primary_secondary_cooking, by = "hh_id") %>%
+  
+  #add LPG main cookstove column
+  mutate(LPG_main = ifelse(primary_cookstove == "Gas:(LPG)/cooking gas stove", "Yes", "No")) %>%
+  
+  #add charcoal/wood main cookstove column
+  mutate(CW_main = ifelse(primary_cookstove == "3-stone stove/open fire" | primary_cookstove == "Charcoal stove", "Yes", "No")) %>%
+  
+  #change NA values in charcoal/lpg main to "No". These respondents skipped over this question bc they don't cook
+  mutate(LPG_main = coalesce(LPG_main, "No"),
+         CW_main = coalesce(CW_main, "No")) %>%
+  
+  #add in house structure data
+  left_join(house_structure)
+
+
+```
+
+
+
+# RAKE 1
+
+## Adding collapsed region and collapsd primary cooking type 
+```{r}
+#collapse some of the regions and fuel types so there are enough in each group ----
+full_survey_collapsed <- full_survey %>%
+  
+  #collapse region
+  mutate(collapsed_region = case_when(
+  region %in% c("Ashanti", "Eastern") ~ "middle",
+  region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti", "Bono", "Bono East", "Ahafo") ~ "northern",
+  region %in% c("Greater Accra", "Volta") ~ "southeast",
+  region %in% c("Central", "Western", "Western North") ~ "southwest",
+  TRUE ~ region)) %>%
+  
+  #collapse fuel type
+  mutate(collapsed_fuel = case_when(
+    primary_cookstove == "Gas:(LPG)/cooking gas stove" ~ "LPG",
+    primary_cookstove == "Charcoal stove" ~ "charcoal",
+    primary_cookstove == "3-stone stove/open fire" ~ "wood",
+    is.na(primary_cookstove) ~ "none_other",
+    TRUE ~ "none_other"
+  ))
+```
+
+### check out survey distribution of collapsed fuel and collapsed region to check for small groups
+```{r}
+full_survey_collapsed %>% group_by(collapsed_fuel, collapsed_region) %>% count()
+```
+
+
+## Setting up the population tables
+
+## National population totals 
+```{r}
+### urban/rural total
+pop.urban_rural_str <- data.frame(urban_rural_str=c("urban", "rural"), Freq=c(5090702, 3254711)*(8365174/sum(c(5090702, 3254711)))) #applying a scaling factor to make sure all the population totals are consistent 
+
+### primary fuel categories 
+pop.primary_fuel <- data.frame(collapsed_fuel = c("none_other", "wood", "LPG", "charcoal"), Freq = round(c(732934, 2594937, 3086324, 1942771)*(8365174/sum(c(732934, 2594937, 3086324, 1942771))),0))
+```
+
+## Regional population totals 
+```{r}
+### regional 2021 HH populations 
+pop.region_hh <- data.frame(
+  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
+  Freq = c(621349, 838493, 1702160, 491373, 881328, 1523101, 240086, 152801, 317994, 288725, 174031, 437934, 133114, 108088, 264404, 190193))
+```
+
+### regional main fuel
+```{r}
+#specify known main fuel population values for each of the regions 
+none = round(c(68717,64761,140709,19124,64243,158757,18141,12857,30469,22818,8238,24587,9615,2480,7088,9240)*(8365174/8356966), 0) #multiply by scaling factor again 
+  
+wood = round(c(186438,218835,36216,163840,282771,356872,143400,79069,141686,138749,109925,278929,91769,89764,159442,117232)*(8365174/8356966),0)
+  
+LPG = round(c(234023,311238,1157759,165592,295140,579078,42713,31282,88699,48228,17780,45379,5768,4579,36339,22727)*(8365174/8356966),0)
+
+charcoal = round(c(127558,239318,349266,141057,233782,416047,34646,28904,55242,77728,37579,84153,25421,10854,41005,40211)*(8365174/8356966),0)
+
+other <- round((c(620787,837879,1698374,491091,880838,1521844,239948,152690,317864,288506,173924,437788,133045,108053,264246,190089)*(8365174/8356966)),0) - none - wood - LPG - charcoal
+
+
+pop.region_main_fuel <- data.frame(
+  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
+  
+  none_other = none + other, #needed to recombine none and other for counts
+  wood = wood,
+  LPG = LPG,
+  charcoal = charcoal)
+
+
+northern <- pop.region_main_fuel %>%
+  filter(region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti", "Bono", "Bono East", "Ahafo")) %>%
+  summarise(
+    region = "northern",
+    none_other = sum(none_other),
+    wood = sum(wood),
+    LPG = sum(LPG),
+    charcoal = sum(charcoal)
+  )
+
+
+middle <- pop.region_main_fuel %>%
+  filter(region %in% c("Ashanti", "Eastern")) %>%
+  summarise(
+    region = "middle",
+    none_other = sum(none_other),
+    wood = sum(wood),
+    LPG = sum(LPG),
+    charcoal = sum(charcoal)
+  )
+
+southeast <- pop.region_main_fuel %>%
+  filter(region %in% c("Greater Accra", "Volta")) %>%
+  summarise(
+    region = "southeast",
+    none_other = sum(none_other),
+    wood = sum(wood),
+    LPG = sum(LPG),
+    charcoal = sum(charcoal)
+  )
+
+southwest <- pop.region_main_fuel %>%
+  filter(region %in% c("Central", "Western", "Western North")) %>%
+  summarise(
+    region = "southwest",
+    none_other = sum(none_other),
+    wood = sum(wood),
+    LPG = sum(LPG),
+    charcoal = sum(charcoal)
+  )
+
+collapsed_region_primary_fuel <- bind_rows(northern, middle, southeast, southwest)
+
+
+#Combine primary fuel with each row specifying which is applicable 
+pop_region_primary_fuel_long <- collapsed_region_primary_fuel %>%
+  pivot_longer(cols = c(none_other, wood, LPG, charcoal), names_to = "collapsed_fuel", values_to = "Count") #names need to match what is in the survey!!
+
+# reformat this data so each row is a household (necessary for creating pop.table below)
+pop_region_primary_fuel_long <- pop_region_primary_fuel_long %>%
+  uncount(Count) %>%
+  rename(collapsed_region = region)
+
+#create table of LPG main stove by collapsed regions
+pop.table_primary_fuel <- xtabs(~collapsed_region+collapsed_fuel, pop_region_primary_fuel_long)
+```
+
+### regional urban/rural 
+```{r}
+#regional 2021 HH populations 
+pop.region_urban_rural_hh <- data.frame(
+  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
+  rural = c(292842, 344366, 123225, 277898, 413370, 566043,
+  162918, 73304, 120206, 123162, 112719, 201727, 89556, 69922, 189290, 129218),
+  urban = c(328507, 494127, 1578935, 213475, 467958, 957058,
+  77168, 79497, 197788, 165563, 61312, 236207, 43558, 38166, 75114, 60975))
+
+
+# get population urban/rural split for each region of the collapsed regions ----
+northern <- pop.region_urban_rural_hh %>%
+  filter(region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti", "Bono", "Bono East", "Ahafo")) %>%
+  summarise(
+    region = "northern",
+    urban = sum(urban),
+    rural = sum(rural)
+  )
+
+middle <- pop.region_urban_rural_hh %>%
+  filter(region %in% c("Ashanti", "Eastern")) %>%
+  summarise(
+    region = "middle",
+    urban = sum(urban),
+    rural = sum(rural)
+  )
+
+southeast <- pop.region_urban_rural_hh %>%
+  filter(region %in% c("Greater Accra", "Volta")) %>%
+  summarise(
+    region = "southeast",
+    urban = sum(urban),
+    rural = sum(rural)
+  )
+
+southwest <- pop.region_urban_rural_hh %>%
+  filter(region %in% c("Central", "Western", "Western North")) %>%
+  summarise(
+    region = "southwest",
+    urban = sum(urban),
+    rural = sum(rural)
+  )
+
+
+collapsed_region_urban_rural_hh <- bind_rows(northern, middle, southeast, southwest)
+
+#Combine LPG yes/no columns with each row specifying which is applicable 
+pop_region_urban_rural_long <- collapsed_region_urban_rural_hh %>%
+  pivot_longer(cols = c(rural, urban), names_to = "urban_rural_str", values_to = "Count") #names need to match what is in the survey!!
+
+# reformat this data so each row is a household (necessary for creating pop.table below)
+pop_region_urban_rural_long <- pop_region_urban_rural_long %>%
+  uncount(Count) %>%
+  rename(collapsed_region = region)
+
+#create table of LPG main stove by collapsed regions
+pop.table_urban_rural <- xtabs(~collapsed_region+urban_rural_str, pop_region_urban_rural_long)
+```
+
+
+## Setting up the initial survey design
+```{r}
+#specify the initial survey design again
+survey_design <- svydesign(id=~eacode, #specify clusters 
+                           fpc= ~fpc, #include finite population correction (GL and FM calculations)
+                           weights= ~weight, #specify the survey weights
+                           strata= ~region, #specify the region strata
+                           data=full_survey_collapsed)
+```
+
+
+
+## Starting the raking
+```{r}
+raked_surv <- rake(survey_design, 
+                   
+                   list(~urban_rural_str+collapsed_region,
+                        ~collapsed_region+collapsed_fuel,
+                        ~region), 
+                   list(pop.table_urban_rural, 
+                        pop.table_primary_fuel,
+                        pop.region_hh), 
+                   
+                   control = list(maxit = 15, epsilon = 1))
+
+upper_weight <- mean(weights(raked_surv, type = "sampling")) * 5
+
+trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
+                                   strict = TRUE)
+```
+
+## National Population Results from Rake 1
+
+```{r}
+#total population
+survey::svytotal(c(rep(1, nrow(full_survey))), trimmed_raked_surv)
+
+#urban/rural totals
+svytotal(~urban_rural_str, design = trimmed_raked_surv, na.rm = TRUE)
+confint(svytotal(~urban_rural_str, design = trimmed_raked_surv, na.rm = TRUE))
+
+#region hh populations 
+svytotal(~region, design = trimmed_raked_surv, na.rm = TRUE)
+
+#mean hh members
+svymean(~total_hh_num, design = trimmed_raked_surv, na.rm = TRUE)
+confint(svymean(~total_hh_num, design = trimmed_raked_surv, na.rm = TRUE))
+
+#LPG main stove
+svytotal(~collapsed_fuel, design = trimmed_raked_surv)
+confint(svytotal(~collapsed_fuel, design = trimmed_raked_surv))
+
+
+#URBAN
+#urban subset 
+urban_sub <- subset(trimmed_raked_surv, urban_rural == 1)
+
+#urban hh size
+svymean(~total_hh_num, design = urban_sub, na.rm = TRUE)
+confint(svymean(~total_hh_num, design = urban_sub, na.rm = TRUE))
+
+#urban LPG primary stove 
+svytotal(~collapsed_fuel, design = urban_sub, na.rm = TRUE)
+confint(svytotal(~collapsed_fuel, design = urban_sub, na.rm = TRUE))
+
+
+#RURAL
+#rural subset
+rural_sub <- subset(trimmed_raked_surv, urban_rural == 2)
+
+# rural hh size 
+svymean(~total_hh_num, design = rural_sub, na.rm = TRUE)
+confint(svymean(~total_hh_num, design = rural_sub, na.rm = TRUE))
+
+# rural LPG primary stove
+svytotal(~collapsed_fuel, design = rural_sub, na.rm = TRUE)
+confint(svytotal(~collapsed_fuel, design = rural_sub, na.rm = TRUE))
+
+
+#Greater Accra LPG
+accra_sub <- subset(trimmed_raked_surv, region == "Greater Accra")
+svytotal(~collapsed_fuel, design = accra_sub, na.rm = TRUE)
+confint(svytotal(~collapsed_fuel, design = accra_sub, na.rm = TRUE))
+
+#Ashanti LPG
+ashanti_sub <- subset(trimmed_raked_surv, region == "Ashanti")
+svytotal(~collapsed_fuel, design = ashanti_sub, na.rm = TRUE)
+confint(svytotal(~collapsed_fuel, design = ashanti_sub, na.rm = TRUE))
+
+
+#check out hh structures
+svytotal(~hh_water_source, design = trimmed_raked_surv, na.rm = TRUE)
+confint(svytotal(~hh_water_source, design = trimmed_raked_surv, na.rm = TRUE))
+
+svymean(~house_rooms, design = trimmed_raked_surv, na.rm = TRUE)
+```
+
+## Examine new weights from Rake 1
+
+```{r}
+#Identify new weights from raking process
+raked_weights <- weights(trimmed_raked_surv, type = "sampling")
+
+#add new weights to full dataframe
+survey_all_weights <- bind_cols(survey_with_weights, raked_weights) %>%
+  rename("rake_weight" = "...58") %>%
+  mutate(weight_diff = rake_weight - weight,
+         weight_ratio = rake_weight / weight)
+
+#graphing the original weights with the comparison
+survey_all_weights %>%
+  pivot_longer(cols = c(weight, rake_weight), names_to = "Variable", values_to = "Value") %>%
+  ggplot(aes(x = Value, fill = Variable)) +
+  geom_histogram(bins = 30, position = "identity", alpha = 0.6) +
+  labs(title = "Histogram of Weights: Rake 4",
+       x = "Survey Weight",
+       y = "Frequency",
+       fill = "Weight Origin") +
+  theme_bw() +
+  scale_fill_manual(values = c("rake_weight" = "#a8605d", 
+                               "weight" = "#7fabc7"),
+                    labels = c("rake_weight" = "Raked Weight", 
+                               "weight" = "Original Weights")) 
+
+# #create df with hh_id and weights to be exported
+# survey_all_weights_4 <- survey_all_weights %>% select(hh_id, rake_weight) %>%
+#   mutate(rake_method = 4)
+# 
+# # Write the tibble to a CSV file
+# write_csv(survey_all_weights_4, "rake_4_weights.csv")
+```
+
+
+
+# RAKE 2
+
+## Adding collapsed region and collapsd primary cooking type 
+```{r}
+#collapse some of the regions and fuel types so there are enough in each group ----
+full_survey_collapsed <- full_survey %>%
+  
+  #collapse region
+  mutate(collapsed_region = case_when(
+  region %in% c("Ashanti", "Eastern") ~ "middle",
+  region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti", "Western North", "Bono", "Bono East", "Ahafo") ~ "northern",
+  region %in% c("Greater Accra", "Volta", "Central", "Western") ~ "coastal",
+  TRUE ~ region)) %>%
+  
+  #collapse fuel type
+  mutate(collapsed_fuel = case_when(
+    primary_cookstove == "Gas:(LPG)/cooking gas stove" ~ "LPG",
+    primary_cookstove == "Charcoal stove" ~ "charcoal",
+    primary_cookstove == "3-stone stove/open fire" ~ "wood",
+    is.na(primary_cookstove) ~ "none_other",
+    TRUE ~ "none_other"
+  ))
+```
+
+## checking out counts for collapsed region and fuel for survey
+```{r}
+full_survey_collapsed %>% group_by(collapsed_region, collapsed_fuel) %>% count()
+```
+
+
+## Setting up the initial survey design 
+```{r}
+# Survey design using survey package
+survey_design <- svydesign(id=~eacode, #specify clusters 
+                           fpc= ~fpc, #include finite population correction (GL and FM calculations)
+                           weights= ~weight, #specify the survey weights
+                           strata= ~region, #specify the region strata
+                           data=full_survey_collapsed)
+```
+
+
+##  POPULATION VALUES
+
+## National population totals 
+
+```{r}
+### urban/rural total
+pop.urban_rural_str <- data.frame(urban_rural_str=c("urban", "rural"), Freq=c(5090702, 3254711)*(8365174/sum(c(5090702, 3254711)))) #applying a scaling factor to make sure all the population totals are consistent 
+
+### primary fuel categories 
+pop.primary_fuel <- data.frame(collapsed_fuel = c("none_other", "wood", "LPG", "charcoal"), Freq = round(c(732934, 2594937, 3086324, 1942771)*(8365174/sum(c(732934, 2594937, 3086324, 1942771))),0))
+```
+
+## Regional population totals 
+
+```{r}
+### regional 2021 HH populations 
+pop.region_hh <- data.frame(
+  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
+  Freq = c(621349, 838493, 1702160, 491373, 881328, 1523101, 240086, 152801, 317994, 288725, 174031, 437934, 133114, 108088, 264404, 190193))
+```
+
+
+### regional main fuel
+```{r}
+#specify known main fuel population values for each of the regions 
+none = round(c(68717,64761,140709,19124,64243,158757,18141,12857,30469,22818,8238,24587,9615,2480,7088,9240)*(8365174/8356966), 0) #multiply by scaling factor again 
+  
+wood = round(c(186438,218835,36216,163840,282771,356872,143400,79069,141686,138749,109925,278929,91769,89764,159442,117232)*(8365174/8356966),0)
+  
+LPG = round(c(234023,311238,1157759,165592,295140,579078,42713,31282,88699,48228,17780,45379,5768,4579,36339,22727)*(8365174/8356966),0)
+
+charcoal = round(c(127558,239318,349266,141057,233782,416047,34646,28904,55242,77728,37579,84153,25421,10854,41005,40211)*(8365174/8356966),0)
+
+other <- round((c(620787,837879,1698374,491091,880838,1521844,239948,152690,317864,288506,173924,437788,133045,108053,264246,190089)*(8365174/8356966)),0) - none - wood - LPG - charcoal
+
+
+pop.region_main_fuel <- data.frame(
+  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
+  
+  none_other = none + other, #needed to recombine none and other for counts
+  wood = wood,
+  LPG = LPG,
+  charcoal = charcoal)
+
+
+northern <- pop.region_main_fuel %>%
+  filter(region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti", "Western North", "Bono", "Bono East", "Ahafo")) %>%
+  summarise(
+    region = "northern",
+    none_other = sum(none_other),
+    wood = sum(wood),
+    LPG = sum(LPG),
+    charcoal = sum(charcoal)
+  )
+
+
+middle <- pop.region_main_fuel %>%
+  filter(region %in% c("Ashanti", "Eastern")) %>%
+  summarise(
+    region = "middle",
+    none_other = sum(none_other),
+    wood = sum(wood),
+    LPG = sum(LPG),
+    charcoal = sum(charcoal)
+  )
+
+coastal <- pop.region_main_fuel %>%
+  filter(region %in% c("Greater Accra", "Volta", "Central", "Western")) %>%
+  summarise(
+    region = "coastal",
+    none_other = sum(none_other),
+    wood = sum(wood),
+    LPG = sum(LPG),
+    charcoal = sum(charcoal)
+  )
+
+
+collapsed_region_primary_fuel <- bind_rows(northern, middle, coastal)
+
+
+#Combine primary fuel with each row specifying which is applicable 
+pop_region_primary_fuel_long <- collapsed_region_primary_fuel %>%
+  pivot_longer(cols = c(none_other, wood, LPG, charcoal), names_to = "collapsed_fuel", values_to = "Count") #names need to match what is in the survey!!
+
+# reformat this data so each row is a household (necessary for creating pop.table below)
+pop_region_primary_fuel_long <- pop_region_primary_fuel_long %>%
+  uncount(Count) %>%
+  rename(collapsed_region = region)
+
+#create table of LPG main stove by collapsed regions
+pop.table_primary_fuel <- xtabs(~collapsed_region+collapsed_fuel, pop_region_primary_fuel_long)
+```
+
+### regional urban/rural 
+```{r}
+#regional 2021 HH populations 
+pop.region_urban_rural_hh <- data.frame(
+  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
+  rural = c(292842, 344366, 123225, 277898, 413370, 566043,
+  162918, 73304, 120206, 123162, 112719, 201727, 89556, 69922, 189290, 129218),
+  urban = c(328507, 494127, 1578935, 213475, 467958, 957058,
+  77168, 79497, 197788, 165563, 61312, 236207, 43558, 38166, 75114, 60975))
+
+
+# get population urban/rural split for each region of the collapsed regions ----
+northern <- pop.region_urban_rural_hh %>%
+  filter(region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti", "Western North", "Bono", "Bono East", "Ahafo")) %>%
+  summarise(
+    region = "northern",
+    urban = sum(urban),
+    rural = sum(rural)
+  )
+
+middle <- pop.region_urban_rural_hh %>%
+  filter(region %in% c("Ashanti", "Eastern")) %>%
+  summarise(
+    region = "middle",
+    urban = sum(urban),
+    rural = sum(rural)
+  )
+
+coastal <- pop.region_urban_rural_hh %>%
+  filter(region %in% c("Greater Accra", "Volta", "Central", "Western")) %>%
+  summarise(
+    region = "coastal",
+    urban = sum(urban),
+    rural = sum(rural)
+  )
+
+
+collapsed_region_urban_rural_hh <- bind_rows(northern, middle, coastal)
+
+#Combine LPG yes/no columns with each row specifying which is applicable 
+pop_region_urban_rural_long <- collapsed_region_urban_rural_hh %>%
+  pivot_longer(cols = c(rural, urban), names_to = "urban_rural_str", values_to = "Count") #names need to match what is in the survey!!
+
+# reformat this data so each row is a household (necessary for creating pop.table below)
+pop_region_urban_rural_long <- pop_region_urban_rural_long %>%
+  uncount(Count) %>%
+  rename(collapsed_region = region)
+
+#create table of LPG main stove by collapsed regions
+pop.table_urban_rural <- xtabs(~collapsed_region+urban_rural_str, pop_region_urban_rural_long)
+```
+
+
+## Starting the raking
+```{r}
+raked_surv <- rake(survey_design, 
+                   
+                   list(~urban_rural_str+collapsed_region,
+                        ~collapsed_region+collapsed_fuel,
+                        ~region), 
+                   list(pop.table_urban_rural, 
+                        pop.table_primary_fuel,
+                        pop.region_hh), 
+                   
+                   control = list(maxit = 15, epsilon = 1))
+
+upper_weight <- mean(weights(raked_surv, type = "sampling")) * 5
+
+trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
+                                   strict = TRUE)
+```
+## National Population Results from Rake 2
+
+```{r}
+#total population
+survey::svytotal(c(rep(1, nrow(full_survey))), trimmed_raked_surv)
+
+#urban/rural totals
+svytotal(~urban_rural_str, design = trimmed_raked_surv, na.rm = TRUE)
+confint(svytotal(~urban_rural_str, design = trimmed_raked_surv, na.rm = TRUE))
+
+#region hh populations 
+svytotal(~region, design = trimmed_raked_surv, na.rm = TRUE)
+
+#mean hh members
+svymean(~total_hh_num, design = trimmed_raked_surv, na.rm = TRUE)
+confint(svymean(~total_hh_num, design = trimmed_raked_surv, na.rm = TRUE))
+
+#LPG main stove
+svytotal(~collapsed_fuel, design = trimmed_raked_surv)
+confint(svytotal(~collapsed_fuel, design = trimmed_raked_surv))
+
+
+#URBAN
+#urban subset 
+urban_sub <- subset(trimmed_raked_surv, urban_rural == 1)
+
+#urban hh size
+svymean(~total_hh_num, design = urban_sub, na.rm = TRUE)
+confint(svymean(~total_hh_num, design = urban_sub, na.rm = TRUE))
+
+#urban LPG primary stove 
+svytotal(~collapsed_fuel, design = urban_sub, na.rm = TRUE)
+confint(svytotal(~collapsed_fuel, design = urban_sub, na.rm = TRUE))
+
+
+#RURAL
+#rural subset
+rural_sub <- subset(trimmed_raked_surv, urban_rural == 2)
+
+# rural hh size 
+svymean(~total_hh_num, design = rural_sub, na.rm = TRUE)
+confint(svymean(~total_hh_num, design = rural_sub, na.rm = TRUE))
+
+# rural LPG primary stove
+svytotal(~collapsed_fuel, design = rural_sub, na.rm = TRUE)
+confint(svytotal(~collapsed_fuel, design = rural_sub, na.rm = TRUE))
+
+
+#Greater Accra LPG
+accra_sub <- subset(trimmed_raked_surv, region == "Greater Accra")
+svytotal(~collapsed_fuel, design = accra_sub, na.rm = TRUE)
+confint(svytotal(~collapsed_fuel, design = accra_sub, na.rm = TRUE))
+
+#Ashanti LPG
+ashanti_sub <- subset(trimmed_raked_surv, region == "Ashanti")
+svytotal(~collapsed_fuel, design = ashanti_sub, na.rm = TRUE)
+confint(svytotal(~collapsed_fuel, design = ashanti_sub, na.rm = TRUE))
+
+
+#check out hh structures
+svytotal(~hh_water_source, design = trimmed_raked_surv, na.rm = TRUE)
+confint(svytotal(~hh_water_source, design = trimmed_raked_surv, na.rm = TRUE))
+
+svymean(~house_rooms, design = trimmed_raked_surv, na.rm = TRUE)
+
+```
+
+## Examine new weights from Rake 2
+
+```{r}
+#Identify new weights from raking process
+raked_weights <- weights(trimmed_raked_surv, type = "sampling")
+
+#add new weights to full dataframe
+survey_all_weights <- bind_cols(survey_with_weights, raked_weights) %>%
+  rename("rake_weight" = "...58") %>%
+  mutate(weight_diff = rake_weight - weight,
+         weight_ratio = rake_weight / weight)
+
+#graphing the original weights with the comparison
+survey_all_weights %>%
+  pivot_longer(cols = c(weight, rake_weight), names_to = "Variable", values_to = "Value") %>%
+  ggplot(aes(x = Value, fill = Variable)) +
+  geom_histogram(bins = 30, position = "identity", alpha = 0.6) +
+  labs(title = "Histogram of Weights: Rake 4",
+       x = "Survey Weight",
+       y = "Frequency",
+       fill = "Weight Origin") +
+  theme_bw() +
+  scale_fill_manual(values = c("rake_weight" = "#a8605d", 
+                               "weight" = "#7fabc7"),
+                    labels = c("rake_weight" = "Raked Weight", 
+                               "weight" = "Original Weights")) 
+
+# #create df with hh_id and weights to be exported
+# survey_all_weights_4 <- survey_all_weights %>% select(hh_id, rake_weight) %>%
+#   mutate(rake_method = 4)
+# 
+# # Write the tibble to a CSV file
+# write_csv(survey_all_weights_4, "rake_4_weights.csv")
+```
+
+
+
+
+# RAKE 3
+
+## Adding collapsed region and collapsd primary cooking type 
+```{r}
+#collapse some of the regions and fuel types so there are enough in each group ----
+full_survey_collapsed <- full_survey %>%
+  
+  #collapse region
+  mutate(collapsed_region = case_when(
+  region %in% c("Ashanti", "Eastern", "Volta") ~ "middle",
+  region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti", "Western North", "Bono", "Bono East", "Ahafo") ~ "northern",
+  region %in% c("Greater Accra", "Central", "Western") ~ "coastal",
+  TRUE ~ region)) %>%
+  
+  #collapse fuel type
+  mutate(collapsed_fuel = case_when(
+    primary_cookstove == "Gas:(LPG)/cooking gas stove" ~ "LPG",
+    primary_cookstove == "Charcoal stove" ~ "charcoal",
+    primary_cookstove == "3-stone stove/open fire" ~ "wood",
+    is.na(primary_cookstove) ~ "none_other",
+    TRUE ~ "none_other"
+  ))
+```
+
+
+## checking out counts for collapsed region and fuel for survey
+```{r}
+full_survey_collapsed %>% group_by(collapsed_region, collapsed_fuel) %>% count()
+```
+
+
+## Setting up the initial survey design 
+```{r}
+# Survey design using survey package
+survey_design <- svydesign(id=~eacode, #specify clusters 
+                           fpc= ~fpc, #include finite population correction (GL and FM calculations)
+                           weights= ~weight, #specify the survey weights
+                           strata= ~region, #specify the region strata
+                           data=full_survey_collapsed)
+```
+
+
+##  POPULATION VALUES
+
+## National population totals 
+```{r}
+### urban/rural total
+pop.urban_rural_str <- data.frame(urban_rural_str=c("urban", "rural"), Freq=c(5090702, 3254711)*(8365174/sum(c(5090702, 3254711)))) #applying a scaling factor to make sure all the population totals are consistent 
+
+### primary fuel categories 
+pop.primary_fuel <- data.frame(collapsed_fuel = c("none_other", "wood", "LPG", "charcoal"), Freq = round(c(732934, 2594937, 3086324, 1942771)*(8365174/sum(c(732934, 2594937, 3086324, 1942771))),0))
+```
+
+## Regional population totals 
+
+```{r}
+### regional 2021 HH populations 
+pop.region_hh <- data.frame(
+  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
+  Freq = c(621349, 838493, 1702160, 491373, 881328, 1523101, 240086, 152801, 317994, 288725, 174031, 437934, 133114, 108088, 264404, 190193))
+```
+
+
+### regional main fuel
+```{r}
+#specify known main fuel population values for each of the regions 
+none = round(c(68717,64761,140709,19124,64243,158757,18141,12857,30469,22818,8238,24587,9615,2480,7088,9240)*(8365174/8356966), 0) #multiply by scaling factor again 
+  
+wood = round(c(186438,218835,36216,163840,282771,356872,143400,79069,141686,138749,109925,278929,91769,89764,159442,117232)*(8365174/8356966),0)
+  
+LPG = round(c(234023,311238,1157759,165592,295140,579078,42713,31282,88699,48228,17780,45379,5768,4579,36339,22727)*(8365174/8356966),0)
+
+charcoal = round(c(127558,239318,349266,141057,233782,416047,34646,28904,55242,77728,37579,84153,25421,10854,41005,40211)*(8365174/8356966),0)
+
+other <- round((c(620787,837879,1698374,491091,880838,1521844,239948,152690,317864,288506,173924,437788,133045,108053,264246,190089)*(8365174/8356966)),0) - none - wood - LPG - charcoal
+
+
+pop.region_main_fuel <- data.frame(
+  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
+  
+  none_other = none + other, #needed to recombine none and other for counts
+  wood = wood,
+  LPG = LPG,
+  charcoal = charcoal)
+
+
+northern <- pop.region_main_fuel %>%
+  filter(region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti", "Western North", "Bono", "Bono East", "Ahafo")) %>%
+  summarise(
+    region = "northern",
+    none_other = sum(none_other),
+    wood = sum(wood),
+    LPG = sum(LPG),
+    charcoal = sum(charcoal)
+  )
+
+
+middle <- pop.region_main_fuel %>%
+  filter(region %in% c("Ashanti", "Eastern", "Volta")) %>%
+  summarise(
+    region = "middle",
+    none_other = sum(none_other),
+    wood = sum(wood),
+    LPG = sum(LPG),
+    charcoal = sum(charcoal)
+  )
+
+coastal <- pop.region_main_fuel %>%
+  filter(region %in% c("Greater Accra", "Central", "Western")) %>%
+  summarise(
+    region = "coastal",
+    none_other = sum(none_other),
+    wood = sum(wood),
+    LPG = sum(LPG),
+    charcoal = sum(charcoal)
+  )
+
+
+collapsed_region_primary_fuel <- bind_rows(northern, middle, coastal)
+
+
+#Combine primary fuel with each row specifying which is applicable 
+pop_region_primary_fuel_long <- collapsed_region_primary_fuel %>%
+  pivot_longer(cols = c(none_other, wood, LPG, charcoal), names_to = "collapsed_fuel", values_to = "Count") #names need to match what is in the survey!!
+
+# reformat this data so each row is a household (necessary for creating pop.table below)
+pop_region_primary_fuel_long <- pop_region_primary_fuel_long %>%
+  uncount(Count) %>%
+  rename(collapsed_region = region)
+
+#create table of LPG main stove by collapsed regions
+pop.table_primary_fuel <- xtabs(~collapsed_region+collapsed_fuel, pop_region_primary_fuel_long)
+```
+
+### regional urban/rural 
+```{r}
+#regional 2021 HH populations 
+pop.region_urban_rural_hh <- data.frame(
+  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
+  rural = c(292842, 344366, 123225, 277898, 413370, 566043,
+  162918, 73304, 120206, 123162, 112719, 201727, 89556, 69922, 189290, 129218),
+  urban = c(328507, 494127, 1578935, 213475, 467958, 957058,
+  77168, 79497, 197788, 165563, 61312, 236207, 43558, 38166, 75114, 60975))
+
+
+# get population urban/rural split for each region of the collapsed regions ----
+northern <- pop.region_urban_rural_hh %>%
+  filter(region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti", "Western North", "Bono", "Bono East", "Ahafo")) %>%
+  summarise(
+    region = "northern",
+    urban = sum(urban),
+    rural = sum(rural)
+  )
+
+middle <- pop.region_urban_rural_hh %>%
+  filter(region %in% c("Ashanti", "Eastern", "Volta")) %>%
+  summarise(
+    region = "middle",
+    urban = sum(urban),
+    rural = sum(rural)
+  )
+
+coastal <- pop.region_urban_rural_hh %>%
+  filter(region %in% c("Greater Accra", "Central", "Western")) %>%
+  summarise(
+    region = "coastal",
+    urban = sum(urban),
+    rural = sum(rural)
+  )
+
+
+collapsed_region_urban_rural_hh <- bind_rows(northern, middle, coastal)
+
+#Combine LPG yes/no columns with each row specifying which is applicable 
+pop_region_urban_rural_long <- collapsed_region_urban_rural_hh %>%
+  pivot_longer(cols = c(rural, urban), names_to = "urban_rural_str", values_to = "Count") #names need to match what is in the survey!!
+
+# reformat this data so each row is a household (necessary for creating pop.table below)
+pop_region_urban_rural_long <- pop_region_urban_rural_long %>%
+  uncount(Count) %>%
+  rename(collapsed_region = region)
+
+#create table of LPG main stove by collapsed regions
+pop.table_urban_rural <- xtabs(~collapsed_region+urban_rural_str, pop_region_urban_rural_long)
+```
+
+
+## Starting the raking
+```{r}
+raked_surv <- rake(survey_design, 
+                   
+                   list(~urban_rural_str+collapsed_region,
+                        ~collapsed_region+collapsed_fuel,
+                        ~region), 
+                   list(pop.table_urban_rural, 
+                        pop.table_primary_fuel,
+                        pop.region_hh), 
+                   
+                   control = list(maxit = 15, epsilon = 1))
+
+upper_weight <- mean(weights(raked_surv, type = "sampling")) * 5
+
+trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
+                                   strict = TRUE)
+```
+
+## National Population Results from Rake 3
+```{r}
+#total population
+survey::svytotal(c(rep(1, nrow(full_survey))), trimmed_raked_surv)
+
+
+#urban/rural totals
+svytotal(~urban_rural_str, design = trimmed_raked_surv, na.rm = TRUE)
+
+confint(svytotal(~urban_rural_str, design = trimmed_raked_surv, na.rm = TRUE))
+
+#region hh populations 
+svytotal(~region, design = trimmed_raked_surv, na.rm = TRUE)
+
+#mean hh members
+svymean(~total_hh_num, design = trimmed_raked_surv, na.rm = TRUE)
+
+confint(svymean(~total_hh_num, design = trimmed_raked_surv, na.rm = TRUE))
+
+#LPG main stove
+svytotal(~collapsed_fuel, design = trimmed_raked_surv)
+
+confint(svytotal(~collapsed_fuel, design = trimmed_raked_surv))
+
+#URBAN
+#urban subset 
+urban_sub <- subset(trimmed_raked_surv, urban_rural == 1)
+
+#urban hh size
+svymean(~total_hh_num, design = urban_sub, na.rm = TRUE)
+
+confint(svymean(~total_hh_num, design = urban_sub, na.rm = TRUE))
+
+#urban LPG primary stove 
+svytotal(~collapsed_fuel, design = urban_sub, na.rm = TRUE)
+
+confint(svytotal(~collapsed_fuel, design = urban_sub, na.rm = TRUE))
+
+
+#RURAL
+#rural subset
+rural_sub <- subset(trimmed_raked_surv, urban_rural == 2)
+
+# rural hh size 
+svymean(~total_hh_num, design = rural_sub, na.rm = TRUE)
+
+confint(svymean(~total_hh_num, design = rural_sub, na.rm = TRUE))
+
+# rural LPG primary stove
+svytotal(~collapsed_fuel, design = rural_sub, na.rm = TRUE)
+
+confint(svytotal(~collapsed_fuel, design = rural_sub, na.rm = TRUE))
+
+
+#Greater Accra LPG
+accra_sub <- subset(trimmed_raked_surv, region == "Greater Accra")
+svytotal(~collapsed_fuel, design = accra_sub, na.rm = TRUE)
+confint(svytotal(~collapsed_fuel, design = accra_sub, na.rm = TRUE))
+
+#Ashanti LPG
+ashanti_sub <- subset(trimmed_raked_surv, region == "Ashanti")
+svytotal(~collapsed_fuel, design = ashanti_sub, na.rm = TRUE)
+confint(svytotal(~collapsed_fuel, design = ashanti_sub, na.rm = TRUE))
+
+
+#check out hh structures
+svytotal(~hh_water_source, design = trimmed_raked_surv, na.rm = TRUE)
+confint(svytotal(~hh_water_source, design = trimmed_raked_surv, na.rm = TRUE))
+
+svymean(~house_rooms, design = trimmed_raked_surv, na.rm = TRUE)
+
+```
+
+## Examine new weights from Rake 3
+
+```{r}
+#Identify new weights from raking process
+raked_weights <- weights(trimmed_raked_surv, type = "sampling")
+
+#add new weights to full dataframe
+survey_all_weights <- bind_cols(survey_with_weights, raked_weights) %>%
+  rename("rake_weight" = "...58") %>%
+  mutate(weight_diff = rake_weight - weight,
+         weight_ratio = rake_weight / weight)
+
+#graphing the original weights with the comparison
+survey_all_weights %>%
+  pivot_longer(cols = c(weight, rake_weight), names_to = "Variable", values_to = "Value") %>%
+  ggplot(aes(x = Value, fill = Variable)) +
+  geom_histogram(bins = 30, position = "identity", alpha = 0.6) +
+  labs(title = "Histogram of Weights: Rake 4",
+       x = "Survey Weight",
+       y = "Frequency",
+       fill = "Weight Origin") +
+  theme_bw() +
+  scale_fill_manual(values = c("rake_weight" = "#a8605d", 
+                               "weight" = "#7fabc7"),
+                    labels = c("rake_weight" = "Raked Weight", 
+                               "weight" = "Original Weights")) 
+
+# #create df with hh_id and weights to be exported
+# survey_all_weights_4 <- survey_all_weights %>% select(hh_id, rake_weight) %>%
+#   mutate(rake_method = 4)
+# 
+# # Write the tibble to a CSV file
+# write_csv(survey_all_weights_4, "rake_4_weights.csv")
+```
+
+
+# Visualizing the region divides
+
+```{r}
+library(sf)
+library(here)
+
+country <- st_read(here("gha_admbnda_gss_20210308_SHP", "gha_admbnda_adm0_gss_20210308.shp"))
+
+regions <- st_read(here("gha_admbnda_gss_20210308_SHP", "gha_admbnda_adm1_gss_20210308.shp")) %>%
+  rename(region = ADM1_EN)
+
+
+ggplot() +
+  geom_sf(data = regions, aes(fill = region)) +
+  theme_minimal() +
+  labs(fill = "Region",
+       title = "Regions of Ghana")+
+  theme(plot.title = element_text(size = 20)) +
+  theme(
+    axis.text = element_blank(),  # Remove axis text
+    axis.title = element_blank(),  # Remove axis titles
+    panel.grid = element_blank()
+  )
+
+
+
+
+
+rake1_regions <- regions %>%
+  mutate(collapsed_region = case_when(
+  region %in% c("Ashanti", "Eastern") ~ "middle",
+  region %in% c("Upper East", "Upper West", "Northern East", "Northern", "Savannah", "Oti", "Bono", "Bono East", "Ahafo") ~ "northern",
+  region %in% c("Greater Accra", "Volta") ~ "southeast",
+  region %in% c("Central", "Western", "Western North") ~ "southwest",
+  TRUE ~ region)) %>%
+  mutate(collapsed_region = factor(collapsed_region, levels = c("northern", "middle", "southeast", "southwest")))
+
+# Define custom colors for each region
+custom_colors <- c("middle" = "#2b8f6d", 
+                   "northern" = "#58b368", 
+                   "southeast" = "#bcba50", 
+                   "southwest" = "#EFEEB4"
+                   )
+
+ggplot() +
+  geom_sf(data = rake1_regions, aes(fill = collapsed_region)) +
+  scale_fill_manual(values = custom_colors) +
+  theme_minimal() +
+  labs(fill = "Region",
+       title = "Rake 4a Collapsed Regions") +
+  theme(plot.title = element_text(size = 20)) +
+  theme(
+    axis.text = element_blank(),  # Remove axis text
+    axis.title = element_blank(),  # Remove axis titles
+    panel.grid = element_blank()
+  )
+
+
+
+rake2_regions <- regions %>%
+  mutate(collapsed_region = case_when(
+  region %in% c("Ashanti", "Eastern") ~ "middle",
+  region %in% c("Upper East", "Upper West", "Northern East", "Northern", "Savannah", "Oti", "Western North", "Bono", "Bono East", "Ahafo") ~ "northern",
+  region %in% c("Greater Accra", "Volta", "Central", "Western") ~ "coastal",
+  TRUE ~ region)) %>%
+  mutate(collapsed_region = factor(collapsed_region, levels = c("northern", "middle", "coastal")))
+
+# Define custom colors for each region
+custom_colors <- c("middle" = "#2b8f6d", 
+                   "northern" = "#58b368", 
+                   "coastal" = "#EFEEB4"
+                   )
+
+ggplot() +
+  geom_sf(data = rake2_regions, aes(fill = collapsed_region)) +
+  scale_fill_manual(values = custom_colors) +
+  theme_minimal() +
+  labs(fill = "Region",
+       title = "Rake 4b Collapsed Regions") +
+  theme(plot.title = element_text(size = 20)) +
+  theme(
+    axis.text = element_blank(),  # Remove axis text
+    axis.title = element_blank(),  # Remove axis titles
+    panel.grid = element_blank()
+  )
+
+
+
+
+rake3_regions <- regions %>%
+  mutate(collapsed_region = case_when(
+  region %in% c("Ashanti", "Eastern", "Volta") ~ "middle",
+  region %in% c("Upper East", "Upper West", "Northern East", "Northern", "Savannah", "Oti", "Western North", "Bono", "Bono East", "Ahafo") ~ "northern",
+  region %in% c("Greater Accra", "Central", "Western") ~ "coastal",
+  TRUE ~ region)) %>%
+  mutate(collapsed_region = factor(collapsed_region, levels = c("northern", "middle", "coastal")))
+
+# Define custom colors for each region
+custom_colors <- c("middle" = "#2b8f6d", 
+                   "northern" = "#58b368", 
+                   "coastal" = "#EFEEB4"
+                   )
+
+ggplot() +
+  geom_sf(data = rake3_regions, aes(fill = collapsed_region)) +
+  scale_fill_manual(values = custom_colors) +
+  theme_minimal() +
+  labs(fill = "Region",
+       title = "Rake 4c Collapsed Regions") +
+  theme(plot.title = element_text(size = 20)) +
+  theme(
+    axis.text = element_blank(),  # Remove axis text
+    axis.title = element_blank(),  # Remove axis titles
+    panel.grid = element_blank()
+  )
+```
