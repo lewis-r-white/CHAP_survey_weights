@@ -34,6 +34,9 @@ if (Sys.getenv('USER') == "lewiswhite") {
   
   #house structure
   house_structure <- read_csv("House structure (non randomized).csv")
+  
+  #GSS-2021
+  gss <- read_excel("gss_2021.xlsx")
      
 }
 
@@ -81,15 +84,12 @@ full_survey <- left_join(survey_with_weights, primary_secondary_cooking, by = "h
   
   #add in house structure data
   left_join(house_structure)
-
-
 ```
-
 
 
 # RAKE 1
 
-## Adding collapsed region and collapsd primary cooking type 
+## Adding collapsed region and collapsed primary cooking type 
 ```{r}
 #collapse some of the regions and fuel types so there are enough in each group ----
 full_survey_collapsed <- full_survey %>%
@@ -117,48 +117,66 @@ full_survey_collapsed <- full_survey %>%
 full_survey_collapsed %>% group_by(collapsed_fuel, collapsed_region) %>% count()
 ```
 
-
 ## Setting up the population tables
 
 ## National population totals 
 ```{r}
+#total household pop
+hh_pop_tot <- subset(gss, region == "Total")$hh_pop
+
 ### urban/rural total
-pop.urban_rural_str <- data.frame(urban_rural_str=c("urban", "rural"), Freq=c(5090702, 3254711)*(8365174/sum(c(5090702, 3254711)))) #applying a scaling factor to make sure all the population totals are consistent 
+pop.urban_rural_str <-
+  data.frame(
+    urban_rural_str = c("urban", "rural"),
+    Freq = c(
+      subset(gss, region == "Total")$hh_pop_urban,
+      subset(gss, region == "Total")$hh_pop_rural
+    )
+  )
 
 ### primary fuel categories 
-pop.primary_fuel <- data.frame(collapsed_fuel = c("none_other", "wood", "LPG", "charcoal"), Freq = round(c(732934, 2594937, 3086324, 1942771)*(8365174/sum(c(732934, 2594937, 3086324, 1942771))),0))
+frac_lpg <- subset(gss, region == "Total")$fuel_lpg / subset(gss, region == "Total")$hh_pop_fuel
+frac_char <- subset(gss, region == "Total")$fuel_char / subset(gss, region == "Total")$hh_pop_fuel
+frac_wood <- subset(gss, region == "Total")$fuel_wood / subset(gss, region == "Total")$hh_pop_fuel
+  
+pop.primary_fuel <-
+  data.frame(
+    collapsed_fuel = c("none_other", "wood", "LPG", "charcoal"),
+    Freq = c(
+      round((1 - (frac_lpg + frac_wood + frac_char)) * hh_pop_tot, 0),
+      round(frac_wood * hh_pop_tot, 0),
+      round(frac_lpg * hh_pop_tot, 0),
+      round(frac_char * hh_pop_tot, 0)
+    )
+  )
 ```
 
 ## Regional population totals 
 ```{r}
 ### regional 2021 HH populations 
+gss_regional <- filter(gss, region != "Total") 
+
 pop.region_hh <- data.frame(
-  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
-  Freq = c(621349, 838493, 1702160, 491373, 881328, 1523101, 240086, 152801, 317994, 288725, 174031, 437934, 133114, 108088, 264404, 190193))
+  region = gss_regional$region,
+  Freq = gss_regional$hh_pop
+)
 ```
 
 ### regional main fuel
 ```{r}
 #specify known main fuel population values for each of the regions 
-none = round(c(68717,64761,140709,19124,64243,158757,18141,12857,30469,22818,8238,24587,9615,2480,7088,9240)*(8365174/8356966), 0) #multiply by scaling factor again 
+pop.region_main_fuel <- gss_regional %>% 
+  mutate(none_other = fuel_none + fuel_other) %>%
+  rename(LPG = fuel_lpg, 
+         wood = fuel_wood, 
+         charcoal = fuel_char) %>%
+  select(region, none_other, wood, LPG, charcoal) %>%
   
-wood = round(c(186438,218835,36216,163840,282771,356872,143400,79069,141686,138749,109925,278929,91769,89764,159442,117232)*(8365174/8356966),0)
-  
-LPG = round(c(234023,311238,1157759,165592,295140,579078,42713,31282,88699,48228,17780,45379,5768,4579,36339,22727)*(8365174/8356966),0)
-
-charcoal = round(c(127558,239318,349266,141057,233782,416047,34646,28904,55242,77728,37579,84153,25421,10854,41005,40211)*(8365174/8356966),0)
-
-other <- round((c(620787,837879,1698374,491091,880838,1521844,239948,152690,317864,288506,173924,437788,133045,108053,264246,190089)*(8365174/8356966)),0) - none - wood - LPG - charcoal
-
-
-pop.region_main_fuel <- data.frame(
-  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
-  
-  none_other = none + other, #needed to recombine none and other for counts
-  wood = wood,
-  LPG = LPG,
-  charcoal = charcoal)
-
+  #apply scaling factor so population matches GSS total value
+  mutate(none_other = round(none_other * subset(gss, region == "Total")$hh_pop/subset(gss, region == "Total")$hh_pop_fuel, 0),
+         LPG = round(LPG * subset(gss, region == "Total")$hh_pop/subset(gss, region == "Total")$hh_pop_fuel,0),
+         wood = round(wood * subset(gss, region == "Total")$hh_pop/subset(gss, region == "Total")$hh_pop_fuel, 0),
+         charcoal = round(charcoal * subset(gss, region == "Total")$hh_pop/subset(gss, region == "Total")$hh_pop_fuel, 0))
 
 northern <- pop.region_main_fuel %>%
   filter(region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti", "Bono", "Bono East", "Ahafo")) %>%
@@ -220,15 +238,12 @@ pop.table_primary_fuel <- xtabs(~collapsed_region+collapsed_fuel, pop_region_pri
 ### regional urban/rural 
 ```{r}
 #regional 2021 HH populations 
-pop.region_urban_rural_hh <- data.frame(
-  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
-  rural = c(292842, 344366, 123225, 277898, 413370, 566043,
-  162918, 73304, 120206, 123162, 112719, 201727, 89556, 69922, 189290, 129218),
-  urban = c(328507, 494127, 1578935, 213475, 467958, 957058,
-  77168, 79497, 197788, 165563, 61312, 236207, 43558, 38166, 75114, 60975))
+pop.region_urban_rural_hh <- gss_regional %>%
+  select(region, hh_pop_rural, hh_pop_urban) %>%
+  rename(rural = hh_pop_rural, 
+         urban = hh_pop_urban)
 
 
-# get population urban/rural split for each region of the collapsed regions ----
 northern <- pop.region_urban_rural_hh %>%
   filter(region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti", "Bono", "Bono East", "Ahafo")) %>%
   summarise(
@@ -236,6 +251,7 @@ northern <- pop.region_urban_rural_hh %>%
     urban = sum(urban),
     rural = sum(rural)
   )
+
 
 middle <- pop.region_urban_rural_hh %>%
   filter(region %in% c("Ashanti", "Eastern")) %>%
@@ -261,8 +277,8 @@ southwest <- pop.region_urban_rural_hh %>%
     rural = sum(rural)
   )
 
-
 collapsed_region_urban_rural_hh <- bind_rows(northern, middle, southeast, southwest)
+
 
 #Combine LPG yes/no columns with each row specifying which is applicable 
 pop_region_urban_rural_long <- collapsed_region_urban_rural_hh %>%
@@ -281,11 +297,12 @@ pop.table_urban_rural <- xtabs(~collapsed_region+urban_rural_str, pop_region_urb
 ## Setting up the initial survey design
 ```{r}
 #specify the initial survey design again
-survey_design <- svydesign(id=~eacode, #specify clusters 
-                           fpc= ~fpc, #include finite population correction (GL and FM calculations)
+survey_design <- svydesign(id=~eacode, #specify clusters
                            weights= ~weight, #specify the survey weights
                            strata= ~region, #specify the region strata
                            data=full_survey_collapsed)
+
+#fpc was removed because we are sampling less than 5% of the EAs
 ```
 
 
@@ -297,6 +314,7 @@ raked_surv <- rake(survey_design,
                    list(~urban_rural_str+collapsed_region,
                         ~collapsed_region+collapsed_fuel,
                         ~region), 
+                   
                    list(pop.table_urban_rural, 
                         pop.table_primary_fuel,
                         pop.region_hh), 
@@ -411,7 +429,6 @@ survey_all_weights %>%
 ```
 
 
-
 # RAKE 2
 
 ## Adding collapsed region and collapsd primary cooking type 
@@ -446,7 +463,6 @@ full_survey_collapsed %>% group_by(collapsed_region, collapsed_fuel) %>% count()
 ```{r}
 # Survey design using survey package
 survey_design <- svydesign(id=~eacode, #specify clusters 
-                           fpc= ~fpc, #include finite population correction (GL and FM calculations)
                            weights= ~weight, #specify the survey weights
                            strata= ~region, #specify the region strata
                            data=full_survey_collapsed)
@@ -458,44 +474,64 @@ survey_design <- svydesign(id=~eacode, #specify clusters
 ## National population totals 
 
 ```{r}
+#total household pop
+hh_pop_tot <- subset(gss, region == "Total")$hh_pop
+
 ### urban/rural total
-pop.urban_rural_str <- data.frame(urban_rural_str=c("urban", "rural"), Freq=c(5090702, 3254711)*(8365174/sum(c(5090702, 3254711)))) #applying a scaling factor to make sure all the population totals are consistent 
+pop.urban_rural_str <-
+  data.frame(
+    urban_rural_str = c("urban", "rural"),
+    Freq = c(
+      subset(gss, region == "Total")$hh_pop_urban,
+      subset(gss, region == "Total")$hh_pop_rural
+    )
+  )
 
 ### primary fuel categories 
-pop.primary_fuel <- data.frame(collapsed_fuel = c("none_other", "wood", "LPG", "charcoal"), Freq = round(c(732934, 2594937, 3086324, 1942771)*(8365174/sum(c(732934, 2594937, 3086324, 1942771))),0))
+frac_lpg <- subset(gss, region == "Total")$fuel_lpg / subset(gss, region == "Total")$hh_pop_fuel
+frac_char <- subset(gss, region == "Total")$fuel_char / subset(gss, region == "Total")$hh_pop_fuel
+frac_wood <- subset(gss, region == "Total")$fuel_wood / subset(gss, region == "Total")$hh_pop_fuel
+  
+pop.primary_fuel <-
+  data.frame(
+    collapsed_fuel = c("none_other", "wood", "LPG", "charcoal"),
+    Freq = c(
+      round((1 - (frac_lpg + frac_wood + frac_char)) * hh_pop_tot, 0),
+      round(frac_wood * hh_pop_tot, 0),
+      round(frac_lpg * hh_pop_tot, 0),
+      round(frac_char * hh_pop_tot, 0)
+    )
+  )
 ```
 
 ## Regional population totals 
 
 ```{r}
 ### regional 2021 HH populations 
+gss_regional <- filter(gss, region != "Total") 
+
 pop.region_hh <- data.frame(
-  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
-  Freq = c(621349, 838493, 1702160, 491373, 881328, 1523101, 240086, 152801, 317994, 288725, 174031, 437934, 133114, 108088, 264404, 190193))
+  region = gss_regional$region,
+  Freq = gss_regional$hh_pop
+)
 ```
 
 
 ### regional main fuel
 ```{r}
 #specify known main fuel population values for each of the regions 
-none = round(c(68717,64761,140709,19124,64243,158757,18141,12857,30469,22818,8238,24587,9615,2480,7088,9240)*(8365174/8356966), 0) #multiply by scaling factor again 
+pop.region_main_fuel <- gss_regional %>% 
+  mutate(none_other = fuel_none + fuel_other) %>%
+  rename(LPG = fuel_lpg, 
+         wood = fuel_wood, 
+         charcoal = fuel_char) %>%
+  select(region, none_other, wood, LPG, charcoal) %>%
   
-wood = round(c(186438,218835,36216,163840,282771,356872,143400,79069,141686,138749,109925,278929,91769,89764,159442,117232)*(8365174/8356966),0)
-  
-LPG = round(c(234023,311238,1157759,165592,295140,579078,42713,31282,88699,48228,17780,45379,5768,4579,36339,22727)*(8365174/8356966),0)
-
-charcoal = round(c(127558,239318,349266,141057,233782,416047,34646,28904,55242,77728,37579,84153,25421,10854,41005,40211)*(8365174/8356966),0)
-
-other <- round((c(620787,837879,1698374,491091,880838,1521844,239948,152690,317864,288506,173924,437788,133045,108053,264246,190089)*(8365174/8356966)),0) - none - wood - LPG - charcoal
-
-
-pop.region_main_fuel <- data.frame(
-  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
-  
-  none_other = none + other, #needed to recombine none and other for counts
-  wood = wood,
-  LPG = LPG,
-  charcoal = charcoal)
+  #apply scaling factor so population matches GSS total value
+  mutate(none_other = round(none_other * subset(gss, region == "Total")$hh_pop/subset(gss, region == "Total")$hh_pop_fuel, 0),
+         LPG = round(LPG * subset(gss, region == "Total")$hh_pop/subset(gss, region == "Total")$hh_pop_fuel,0),
+         wood = round(wood * subset(gss, region == "Total")$hh_pop/subset(gss, region == "Total")$hh_pop_fuel, 0),
+         charcoal = round(charcoal * subset(gss, region == "Total")$hh_pop/subset(gss, region == "Total")$hh_pop_fuel, 0))
 
 
 northern <- pop.region_main_fuel %>%
@@ -549,12 +585,10 @@ pop.table_primary_fuel <- xtabs(~collapsed_region+collapsed_fuel, pop_region_pri
 ### regional urban/rural 
 ```{r}
 #regional 2021 HH populations 
-pop.region_urban_rural_hh <- data.frame(
-  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
-  rural = c(292842, 344366, 123225, 277898, 413370, 566043,
-  162918, 73304, 120206, 123162, 112719, 201727, 89556, 69922, 189290, 129218),
-  urban = c(328507, 494127, 1578935, 213475, 467958, 957058,
-  77168, 79497, 197788, 165563, 61312, 236207, 43558, 38166, 75114, 60975))
+pop.region_urban_rural_hh <- gss_regional %>%
+  select(region, hh_pop_rural, hh_pop_urban) %>%
+  rename(rural = hh_pop_rural, 
+         urban = hh_pop_urban)
 
 
 # get population urban/rural split for each region of the collapsed regions ----
@@ -757,7 +791,6 @@ full_survey_collapsed %>% group_by(collapsed_region, collapsed_fuel) %>% count()
 ```{r}
 # Survey design using survey package
 survey_design <- svydesign(id=~eacode, #specify clusters 
-                           fpc= ~fpc, #include finite population correction (GL and FM calculations)
                            weights= ~weight, #specify the survey weights
                            strata= ~region, #specify the region strata
                            data=full_survey_collapsed)
@@ -768,44 +801,64 @@ survey_design <- svydesign(id=~eacode, #specify clusters
 
 ## National population totals 
 ```{r}
+#total household pop
+hh_pop_tot <- subset(gss, region == "Total")$hh_pop
+
 ### urban/rural total
-pop.urban_rural_str <- data.frame(urban_rural_str=c("urban", "rural"), Freq=c(5090702, 3254711)*(8365174/sum(c(5090702, 3254711)))) #applying a scaling factor to make sure all the population totals are consistent 
+pop.urban_rural_str <-
+  data.frame(
+    urban_rural_str = c("urban", "rural"),
+    Freq = c(
+      subset(gss, region == "Total")$hh_pop_urban,
+      subset(gss, region == "Total")$hh_pop_rural
+    )
+  )
 
 ### primary fuel categories 
-pop.primary_fuel <- data.frame(collapsed_fuel = c("none_other", "wood", "LPG", "charcoal"), Freq = round(c(732934, 2594937, 3086324, 1942771)*(8365174/sum(c(732934, 2594937, 3086324, 1942771))),0))
+frac_lpg <- subset(gss, region == "Total")$fuel_lpg / subset(gss, region == "Total")$hh_pop_fuel
+frac_char <- subset(gss, region == "Total")$fuel_char / subset(gss, region == "Total")$hh_pop_fuel
+frac_wood <- subset(gss, region == "Total")$fuel_wood / subset(gss, region == "Total")$hh_pop_fuel
+  
+pop.primary_fuel <-
+  data.frame(
+    collapsed_fuel = c("none_other", "wood", "LPG", "charcoal"),
+    Freq = c(
+      round((1 - (frac_lpg + frac_wood + frac_char)) * hh_pop_tot, 0),
+      round(frac_wood * hh_pop_tot, 0),
+      round(frac_lpg * hh_pop_tot, 0),
+      round(frac_char * hh_pop_tot, 0)
+    )
+  )
 ```
 
 ## Regional population totals 
 
 ```{r}
 ### regional 2021 HH populations 
+gss_regional <- filter(gss, region != "Total") 
+
 pop.region_hh <- data.frame(
-  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
-  Freq = c(621349, 838493, 1702160, 491373, 881328, 1523101, 240086, 152801, 317994, 288725, 174031, 437934, 133114, 108088, 264404, 190193))
+  region = gss_regional$region,
+  Freq = gss_regional$hh_pop
+)
 ```
 
 
 ### regional main fuel
 ```{r}
 #specify known main fuel population values for each of the regions 
-none = round(c(68717,64761,140709,19124,64243,158757,18141,12857,30469,22818,8238,24587,9615,2480,7088,9240)*(8365174/8356966), 0) #multiply by scaling factor again 
+pop.region_main_fuel <- gss_regional %>% 
+  mutate(none_other = fuel_none + fuel_other) %>%
+  rename(LPG = fuel_lpg, 
+         wood = fuel_wood, 
+         charcoal = fuel_char) %>%
+  select(region, none_other, wood, LPG, charcoal) %>%
   
-wood = round(c(186438,218835,36216,163840,282771,356872,143400,79069,141686,138749,109925,278929,91769,89764,159442,117232)*(8365174/8356966),0)
-  
-LPG = round(c(234023,311238,1157759,165592,295140,579078,42713,31282,88699,48228,17780,45379,5768,4579,36339,22727)*(8365174/8356966),0)
-
-charcoal = round(c(127558,239318,349266,141057,233782,416047,34646,28904,55242,77728,37579,84153,25421,10854,41005,40211)*(8365174/8356966),0)
-
-other <- round((c(620787,837879,1698374,491091,880838,1521844,239948,152690,317864,288506,173924,437788,133045,108053,264246,190089)*(8365174/8356966)),0) - none - wood - LPG - charcoal
-
-
-pop.region_main_fuel <- data.frame(
-  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
-  
-  none_other = none + other, #needed to recombine none and other for counts
-  wood = wood,
-  LPG = LPG,
-  charcoal = charcoal)
+  #apply scaling factor so population matches GSS total value
+  mutate(none_other = round(none_other * subset(gss, region == "Total")$hh_pop/subset(gss, region == "Total")$hh_pop_fuel, 0),
+         LPG = round(LPG * subset(gss, region == "Total")$hh_pop/subset(gss, region == "Total")$hh_pop_fuel,0),
+         wood = round(wood * subset(gss, region == "Total")$hh_pop/subset(gss, region == "Total")$hh_pop_fuel, 0),
+         charcoal = round(charcoal * subset(gss, region == "Total")$hh_pop/subset(gss, region == "Total")$hh_pop_fuel, 0))
 
 
 northern <- pop.region_main_fuel %>%
@@ -859,13 +912,10 @@ pop.table_primary_fuel <- xtabs(~collapsed_region+collapsed_fuel, pop_region_pri
 ### regional urban/rural 
 ```{r}
 #regional 2021 HH populations 
-pop.region_urban_rural_hh <- data.frame(
-  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
-  rural = c(292842, 344366, 123225, 277898, 413370, 566043,
-  162918, 73304, 120206, 123162, 112719, 201727, 89556, 69922, 189290, 129218),
-  urban = c(328507, 494127, 1578935, 213475, 467958, 957058,
-  77168, 79497, 197788, 165563, 61312, 236207, 43558, 38166, 75114, 60975))
-
+pop.region_urban_rural_hh <- gss_regional %>%
+  select(region, hh_pop_rural, hh_pop_urban) %>%
+  rename(rural = hh_pop_rural, 
+         urban = hh_pop_urban)
 
 # get population urban/rural split for each region of the collapsed regions ----
 northern <- pop.region_urban_rural_hh %>%
@@ -1035,6 +1085,8 @@ survey_all_weights %>%
 # # Write the tibble to a CSV file
 # write_csv(survey_all_weights_4, "rake_4_weights.csv")
 ```
+
+
 
 
 # Visualizing the region divides
