@@ -10,14 +10,15 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ## load libraries
-```{r}
+```{r, message=FALSE, warning = FALSE}
 library(tidyverse)
 library(here)
 library(survey)
+library(readxl)
 ```
 
 ## Set Paths
-```{r}
+```{r, message=FALSE, warning = FALSE}
 if (Sys.getenv('USER') == "lewiswhite") {
     
   # set working directory
@@ -54,7 +55,7 @@ if (Sys.getenv('USER') == "linneagraham") {
 ```
 
 ## Recalculating Linnea and Flavio's weights in R
-```{r}
+```{r, message=FALSE, warning = FALSE}
 LW_EA_weights <- GL_EA_weights %>%
   select(!prob_1:weight_2010) %>% #remove weighting variables 
   mutate(ea_select_prob = eas_selected/eas_2010, #Prob select the cluster (EA)
@@ -64,7 +65,7 @@ LW_EA_weights <- GL_EA_weights %>%
 ```
 
 ## Joining the demographic and cooking data 
-```{r}
+```{r, message=FALSE, warning = FALSE}
 #join the weights to the demographic data
 survey_with_weights <- left_join(demographics, LW_EA_weights, by = c("eacode", "region")) %>%
   filter(!is.na(weight))
@@ -87,10 +88,10 @@ full_survey <- left_join(survey_with_weights, primary_secondary_cooking, by = "h
 ```
 
 
-# RAKE 1
+# RAKE 4a
 
 ## Adding collapsed region and collapsed primary cooking type 
-```{r}
+```{r, message=FALSE, warning = FALSE}
 #collapse some of the regions and fuel types so there are enough in each group ----
 full_survey_collapsed <- full_survey %>%
   
@@ -113,14 +114,14 @@ full_survey_collapsed <- full_survey %>%
 ```
 
 ### check out survey distribution of collapsed fuel and collapsed region to check for small groups
-```{r}
+```{r, message=FALSE, warning = FALSE}
 full_survey_collapsed %>% group_by(collapsed_fuel, collapsed_region) %>% count()
 ```
 
 ## Setting up the population tables
 
 ## National population totals 
-```{r}
+```{r, message=FALSE, warning = FALSE}
 #total household pop
 hh_pop_tot <- subset(gss, region == "Total")$hh_pop
 
@@ -152,7 +153,7 @@ pop.primary_fuel <-
 ```
 
 ## Regional population totals 
-```{r}
+```{r, message=FALSE, warning = FALSE}
 ### regional 2021 HH populations 
 gss_regional <- filter(gss, region != "Total") 
 
@@ -163,7 +164,7 @@ pop.region_hh <- data.frame(
 ```
 
 ### regional main fuel
-```{r}
+```{r, message=FALSE, warning = FALSE}
 #specify known main fuel population values for each of the regions 
 pop.region_main_fuel <- gss_regional %>% 
   mutate(none_other = fuel_none + fuel_other) %>%
@@ -236,7 +237,7 @@ pop.table_primary_fuel <- xtabs(~collapsed_region+collapsed_fuel, pop_region_pri
 ```
 
 ### regional urban/rural 
-```{r}
+```{r, message=FALSE, warning = FALSE}
 #regional 2021 HH populations 
 pop.region_urban_rural_hh <- gss_regional %>%
   select(region, hh_pop_rural, hh_pop_urban) %>%
@@ -295,7 +296,7 @@ pop.table_urban_rural <- xtabs(~collapsed_region+urban_rural_str, pop_region_urb
 
 
 ## Setting up the initial survey design
-```{r}
+```{r, message=FALSE, warning = FALSE}
 #specify the initial survey design again
 survey_design <- svydesign(id=~eacode, #specify clusters
                            weights= ~weight, #specify the survey weights
@@ -308,7 +309,7 @@ survey_design <- svydesign(id=~eacode, #specify clusters
 
 
 ## Starting the raking
-```{r}
+```{r, message=FALSE, warning = FALSE}
 raked_surv <- rake(survey_design, 
                    
                    list(~urban_rural_str+collapsed_region,
@@ -327,9 +328,9 @@ trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
                                    strict = TRUE)
 ```
 
-## National Population Results from Rake 1
+## National Population Results from Rake 4a
 
-```{r}
+```{r, message=FALSE, warning = FALSE}
 #total population
 survey::svytotal(c(rep(1, nrow(full_survey))), trimmed_raked_surv)
 
@@ -393,9 +394,44 @@ confint(svytotal(~hh_water_source, design = trimmed_raked_surv, na.rm = TRUE))
 svymean(~house_rooms, design = trimmed_raked_surv, na.rm = TRUE)
 ```
 
-## Examine new weights from Rake 1
+## writing a loop to find main fuel counts 
 
-```{r}
+```{r, message=FALSE, warning = FALSE}
+#obtain a list of the regions
+regions <- gss_regional$region
+
+#loop through each of the regions in the list 
+for (i in seq_along(regions)){
+  
+  #subset the raked survey to the region
+  region_subset = subset(trimmed_raked_surv, region == regions[i])
+  
+  #create list of regions populations
+  regions_pop <- pop.region_hh[[2]]
+  
+  #obtain population for specific region in the loop
+  region_pop = regions_pop[i]
+  
+  #get the fuel information for the region
+  region_fuel  <- as.data.frame(svytotal(~collapsed_fuel, 
+                                         design = region_subset, 
+                                         na.rm = TRUE))
+  
+  #obtain just the LPG total for the region 
+  region_lpg <- region_fuel[2,1]
+  
+  #calculate the percent LPG for the region
+  region_pct_lpg <- round((region_lpg/region_pop)*100,1)
+  
+  #print the result for each
+  print(region_pct_lpg)
+}
+```
+
+
+## Examine new weights from Rake 4a
+
+```{r, message=FALSE, warning = FALSE}
 #Identify new weights from raking process
 raked_weights <- weights(trimmed_raked_surv, type = "sampling")
 
@@ -410,7 +446,7 @@ survey_all_weights %>%
   pivot_longer(cols = c(weight, rake_weight), names_to = "Variable", values_to = "Value") %>%
   ggplot(aes(x = Value, fill = Variable)) +
   geom_histogram(bins = 30, position = "identity", alpha = 0.6) +
-  labs(title = "Histogram of Weights: Rake 4",
+  labs(title = "Histogram of Weights: Rake 4a",
        x = "Survey Weight",
        y = "Frequency",
        fill = "Weight Origin") +
@@ -420,19 +456,19 @@ survey_all_weights %>%
                     labels = c("rake_weight" = "Raked Weight", 
                                "weight" = "Original Weights")) 
 
-# #create df with hh_id and weights to be exported
-# survey_all_weights_4 <- survey_all_weights %>% select(hh_id, rake_weight) %>%
-#   mutate(rake_method = 4)
-# 
-# # Write the tibble to a CSV file
-# write_csv(survey_all_weights_4, "rake_4_weights.csv")
+#create df with hh_id and weights to be exported
+survey_all_weights_4a <- survey_all_weights %>% select(hh_id, rake_weight) %>%
+  mutate(rake_method = "4a")
+
+# Write the tibble to a CSV file
+write_csv(survey_all_weights_4a, "rake_4a_weights.csv")
 ```
 
 
-# RAKE 2
+# RAKE 4b
 
 ## Adding collapsed region and collapsd primary cooking type 
-```{r}
+```{r, message=FALSE, warning = FALSE}
 #collapse some of the regions and fuel types so there are enough in each group ----
 full_survey_collapsed <- full_survey %>%
   
@@ -454,13 +490,13 @@ full_survey_collapsed <- full_survey %>%
 ```
 
 ## checking out counts for collapsed region and fuel for survey
-```{r}
+```{r, message=FALSE, warning = FALSE}
 full_survey_collapsed %>% group_by(collapsed_region, collapsed_fuel) %>% count()
 ```
 
 
 ## Setting up the initial survey design 
-```{r}
+```{r, message=FALSE, warning = FALSE}
 # Survey design using survey package
 survey_design <- svydesign(id=~eacode, #specify clusters 
                            weights= ~weight, #specify the survey weights
@@ -473,7 +509,7 @@ survey_design <- svydesign(id=~eacode, #specify clusters
 
 ## National population totals 
 
-```{r}
+```{r, message=FALSE, warning = FALSE}
 #total household pop
 hh_pop_tot <- subset(gss, region == "Total")$hh_pop
 
@@ -506,7 +542,7 @@ pop.primary_fuel <-
 
 ## Regional population totals 
 
-```{r}
+```{r, message=FALSE, warning = FALSE}
 ### regional 2021 HH populations 
 gss_regional <- filter(gss, region != "Total") 
 
@@ -518,7 +554,7 @@ pop.region_hh <- data.frame(
 
 
 ### regional main fuel
-```{r}
+```{r, message=FALSE, warning = FALSE}
 #specify known main fuel population values for each of the regions 
 pop.region_main_fuel <- gss_regional %>% 
   mutate(none_other = fuel_none + fuel_other) %>%
@@ -583,7 +619,7 @@ pop.table_primary_fuel <- xtabs(~collapsed_region+collapsed_fuel, pop_region_pri
 ```
 
 ### regional urban/rural 
-```{r}
+```{r, message=FALSE, warning = FALSE}
 #regional 2021 HH populations 
 pop.region_urban_rural_hh <- gss_regional %>%
   select(region, hh_pop_rural, hh_pop_urban) %>%
@@ -634,7 +670,7 @@ pop.table_urban_rural <- xtabs(~collapsed_region+urban_rural_str, pop_region_urb
 
 
 ## Starting the raking
-```{r}
+```{r, message=FALSE, warning = FALSE}
 raked_surv <- rake(survey_design, 
                    
                    list(~urban_rural_str+collapsed_region,
@@ -651,9 +687,9 @@ upper_weight <- mean(weights(raked_surv, type = "sampling")) * 5
 trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
                                    strict = TRUE)
 ```
-## National Population Results from Rake 2
+## National Population Results from Rake 4b
 
-```{r}
+```{r, message=FALSE, warning = FALSE}
 #total population
 survey::svytotal(c(rep(1, nrow(full_survey))), trimmed_raked_surv)
 
@@ -718,9 +754,43 @@ svymean(~house_rooms, design = trimmed_raked_surv, na.rm = TRUE)
 
 ```
 
-## Examine new weights from Rake 2
+## writing a loop to find main fuel counts 
 
-```{r}
+```{r, message=FALSE, warning = FALSE}
+#obtain a list of the regions
+regions <- gss_regional$region
+
+#loop through each of the regions in the list 
+for (i in seq_along(regions)){
+  
+  #subset the raked survey to the region
+  region_subset = subset(trimmed_raked_surv, region == regions[i])
+  
+  #create list of regions populations
+  regions_pop <- pop.region_hh[[2]]
+  
+  #obtain population for specific region in the loop
+  region_pop = regions_pop[i]
+  
+  #get the fuel information for the region
+  region_fuel  <- as.data.frame(svytotal(~collapsed_fuel, 
+                                         design = region_subset, 
+                                         na.rm = TRUE))
+  
+  #obtain just the LPG total for the region 
+  region_lpg <- region_fuel[2,1]
+  
+  #calculate the percent LPG for the region
+  region_pct_lpg <- round((region_lpg/region_pop)*100,1)
+  
+  #print the result for each
+  print(region_pct_lpg)
+}
+```
+
+## Examine new weights from Rake 4b
+
+```{r, message=FALSE, warning = FALSE}
 #Identify new weights from raking process
 raked_weights <- weights(trimmed_raked_surv, type = "sampling")
 
@@ -735,7 +805,7 @@ survey_all_weights %>%
   pivot_longer(cols = c(weight, rake_weight), names_to = "Variable", values_to = "Value") %>%
   ggplot(aes(x = Value, fill = Variable)) +
   geom_histogram(bins = 30, position = "identity", alpha = 0.6) +
-  labs(title = "Histogram of Weights: Rake 4",
+  labs(title = "Histogram of Weights: Rake 4b",
        x = "Survey Weight",
        y = "Frequency",
        fill = "Weight Origin") +
@@ -745,21 +815,21 @@ survey_all_weights %>%
                     labels = c("rake_weight" = "Raked Weight", 
                                "weight" = "Original Weights")) 
 
-# #create df with hh_id and weights to be exported
-# survey_all_weights_4 <- survey_all_weights %>% select(hh_id, rake_weight) %>%
-#   mutate(rake_method = 4)
-# 
-# # Write the tibble to a CSV file
-# write_csv(survey_all_weights_4, "rake_4_weights.csv")
+#create df with hh_id and weights to be exported
+survey_all_weights_4b <- survey_all_weights %>% select(hh_id, rake_weight) %>%
+  mutate(rake_method = "4b")
+
+# Write the tibble to a CSV file
+write_csv(survey_all_weights_4b, "rake_4b_weights.csv")
 ```
 
 
 
 
-# RAKE 3
+# RAKE 4c
 
 ## Adding collapsed region and collapsd primary cooking type 
-```{r}
+```{r, message=FALSE, warning = FALSE}
 #collapse some of the regions and fuel types so there are enough in each group ----
 full_survey_collapsed <- full_survey %>%
   
@@ -782,13 +852,13 @@ full_survey_collapsed <- full_survey %>%
 
 
 ## checking out counts for collapsed region and fuel for survey
-```{r}
+```{r, message=FALSE, warning = FALSE}
 full_survey_collapsed %>% group_by(collapsed_region, collapsed_fuel) %>% count()
 ```
 
 
 ## Setting up the initial survey design 
-```{r}
+```{r, message=FALSE, warning = FALSE}
 # Survey design using survey package
 survey_design <- svydesign(id=~eacode, #specify clusters 
                            weights= ~weight, #specify the survey weights
@@ -800,7 +870,7 @@ survey_design <- svydesign(id=~eacode, #specify clusters
 ##  POPULATION VALUES
 
 ## National population totals 
-```{r}
+```{r, message=FALSE, warning = FALSE}
 #total household pop
 hh_pop_tot <- subset(gss, region == "Total")$hh_pop
 
@@ -833,7 +903,7 @@ pop.primary_fuel <-
 
 ## Regional population totals 
 
-```{r}
+```{r, message=FALSE, warning = FALSE}
 ### regional 2021 HH populations 
 gss_regional <- filter(gss, region != "Total") 
 
@@ -845,7 +915,7 @@ pop.region_hh <- data.frame(
 
 
 ### regional main fuel
-```{r}
+```{r, message=FALSE, warning = FALSE}
 #specify known main fuel population values for each of the regions 
 pop.region_main_fuel <- gss_regional %>% 
   mutate(none_other = fuel_none + fuel_other) %>%
@@ -910,7 +980,7 @@ pop.table_primary_fuel <- xtabs(~collapsed_region+collapsed_fuel, pop_region_pri
 ```
 
 ### regional urban/rural 
-```{r}
+```{r, message=FALSE, warning = FALSE}
 #regional 2021 HH populations 
 pop.region_urban_rural_hh <- gss_regional %>%
   select(region, hh_pop_rural, hh_pop_urban) %>%
@@ -960,7 +1030,7 @@ pop.table_urban_rural <- xtabs(~collapsed_region+urban_rural_str, pop_region_urb
 
 
 ## Starting the raking
-```{r}
+```{r, message=FALSE, warning = FALSE}
 raked_surv <- rake(survey_design, 
                    
                    list(~urban_rural_str+collapsed_region,
@@ -978,8 +1048,8 @@ trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
                                    strict = TRUE)
 ```
 
-## National Population Results from Rake 3
-```{r}
+## National Population Results from Rake 4c
+```{r, message=FALSE, warning = FALSE}
 #total population
 survey::svytotal(c(rep(1, nrow(full_survey))), trimmed_raked_surv)
 
@@ -1051,9 +1121,43 @@ svymean(~house_rooms, design = trimmed_raked_surv, na.rm = TRUE)
 
 ```
 
-## Examine new weights from Rake 3
+## writing a loop to find main fuel counts 
 
-```{r}
+```{r, message=FALSE, warning = FALSE}
+#obtain a list of the regions
+regions <- gss_regional$region
+
+#loop through each of the regions in the list 
+for (i in seq_along(regions)){
+  
+  #subset the raked survey to the region
+  region_subset = subset(trimmed_raked_surv, region == regions[i])
+  
+  #create list of regions populations
+  regions_pop <- pop.region_hh[[2]]
+  
+  #obtain population for specific region in the loop
+  region_pop = regions_pop[i]
+  
+  #get the fuel information for the region
+  region_fuel  <- as.data.frame(svytotal(~collapsed_fuel, 
+                                         design = region_subset, 
+                                         na.rm = TRUE))
+  
+  #obtain just the LPG total for the region 
+  region_lpg <- region_fuel[2,1]
+  
+  #calculate the percent LPG for the region
+  region_pct_lpg <- round((region_lpg/region_pop)*100,1)
+  
+  #print the result for each
+  print(region_pct_lpg)
+}
+```
+
+## Examine new weights from Rake 4c
+
+```{r, message=FALSE, warning = FALSE}
 #Identify new weights from raking process
 raked_weights <- weights(trimmed_raked_surv, type = "sampling")
 
@@ -1068,7 +1172,7 @@ survey_all_weights %>%
   pivot_longer(cols = c(weight, rake_weight), names_to = "Variable", values_to = "Value") %>%
   ggplot(aes(x = Value, fill = Variable)) +
   geom_histogram(bins = 30, position = "identity", alpha = 0.6) +
-  labs(title = "Histogram of Weights: Rake 4",
+  labs(title = "Histogram of Weights: Rake 4c",
        x = "Survey Weight",
        y = "Frequency",
        fill = "Weight Origin") +
@@ -1078,20 +1182,19 @@ survey_all_weights %>%
                     labels = c("rake_weight" = "Raked Weight", 
                                "weight" = "Original Weights")) 
 
-# #create df with hh_id and weights to be exported
-# survey_all_weights_4 <- survey_all_weights %>% select(hh_id, rake_weight) %>%
-#   mutate(rake_method = 4)
-# 
-# # Write the tibble to a CSV file
-# write_csv(survey_all_weights_4, "rake_4_weights.csv")
-```
+#create df with hh_id and weights to be exported
+survey_all_weights_4c <- survey_all_weights %>% select(hh_id, rake_weight) %>%
+  mutate(rake_method = "4c")
 
+# Write the tibble to a CSV file
+write_csv(survey_all_weights_4c, "rake_4c_weights.csv")
+```
 
 
 
 # Visualizing the region divides
 
-```{r}
+```{r, message=FALSE, warning = FALSE}
 library(sf)
 library(here)
 
@@ -1112,8 +1215,6 @@ ggplot() +
     axis.title = element_blank(),  # Remove axis titles
     panel.grid = element_blank()
   )
-
-
 
 
 
