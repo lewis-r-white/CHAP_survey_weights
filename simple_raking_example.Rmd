@@ -1,0 +1,94 @@
+---
+title: "Simple Raking Example"
+author: "Lewis White"
+date: "2024-01-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Creating the sample data
+
+```{r}
+# Creating the dataset
+gender <- c(rep("Male", 30), rep("Male", 20), rep("Female", 20), rep("Female", 30))
+age_group <- c(rep("Young", 30), rep("Old", 20), rep("Young", 20), rep("Old", 30))
+weight <- rep(10, 100)
+
+# Combining gender and age_group to create the dataframe
+example_data <- data.frame(Gender = gender, Age_Group = age_group, Weight = weight)
+```
+
+# specifying the population data 
+```{r}
+#age population table
+pop.Age = data.frame(
+  Age_Group = c("Young", "Old"),
+  Freq = c(40, 60)
+)
+
+# gender population table
+pop.Gender = data.frame(
+  Gender = c("Male", "Female"),
+  Freq = c(60, 40)
+)
+```
+
+# set up base survey design 
+```{r}
+#survey design with no weights
+survey_design <- svydesign(id=~1,
+                           data=example_data)
+```
+
+# rake 
+```{r}
+#rake
+raked_surv <- rake(survey_design, list(~Gender, ~Age_Group), list(pop.Gender, pop.Age), control = list(maxit = 2, epsilon = 1)) #only allowing two iterations to occur to compare to the table in the "Survey Weights ~ Raking" doc
+
+svytotal(~Gender, raked_surv)
+svytotal(~Age_Group, raked_surv)
+
+svytable(~Gender+Age_Group, raked_surv)
+```
+
+
+
+# Using the base weights
+
+# specifying the population data 
+```{r}
+#age population table
+pop.Age = data.frame(
+  Age_Group = c("Young", "Old"),
+  Freq = c(400, 600)
+)
+
+# gender population table
+pop.Gender = data.frame(
+  Gender = c("Male", "Female"),
+  Freq = c(600, 400)
+)
+```
+
+# set up base survey design 
+```{r}
+#survey design with no weights
+survey_design <- svydesign(id=~1,
+                           weights = weight,
+                           data=example_data)
+```
+
+# rake 
+```{r}
+#rake
+raked_surv <- rake(survey_design, list(~Gender, ~Age_Group), list(pop.Gender, pop.Age), control = list(maxit = 2, epsilon = 1)) #only allowing two iterations to occur to compare to the table in the "Survey Weights ~ Raking" doc
+
+svytotal(~Gender, raked_surv)
+svytotal(~Age_Group, raked_surv)
+
+svytable(~Gender+Age_Group, raked_surv)
+```
