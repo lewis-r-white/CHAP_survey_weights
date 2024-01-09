@@ -1,7 +1,7 @@
 ---
 title: "Raking: Organized by GSS population"
-author: "Lewis White"
-date: "2023-11-01"
+author: "Lewis White and Linnea Graham"
+date: "2023-12-28"
 output: html_document
 ---
 
@@ -10,14 +10,15 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ## load libraries
-```{r}
+```{r, message=FALSE, warning=FALSE}
 library(tidyverse)
 library(here)
 library(survey)
+library(readxl)
 ```
 
 ## Set Paths
-```{r}
+```{r, message=FALSE, warning=FALSE}
 if (Sys.getenv('USER') == "lewiswhite") {
     
   # set working directory
@@ -34,24 +35,29 @@ if (Sys.getenv('USER') == "lewiswhite") {
   
   #house structure
   house_structure <- read_csv("House structure (non randomized).csv")
+  
+  #GSS-2021
+  gss <- read_excel("gss_2021.xlsx")
      
 }
 
 if (Sys.getenv('USER') == "linneagraham") {
 
-  ROOT <- ("/Volumes/GoogleDrive-100807402805951836278/.shortcut-targets-by-id/1B0iSt7ZGnvhcH8p5MtZccbjg10Pho9qT/ColumbiaWorldProjectsGhana/03_Phase_1/01_Assessment_Household_Needs/")
+  ROOT <- ("/Volumes/GoogleDrive-100807402805951836278/.shortcut-targets-by-id/1B0iSt7ZGnvhcH8p5MtZccbjg10Pho9qT/ColumbiaWorldProjectsGhana/03_Phase_1/01_Assessment_Household_Needs")
 
   GL_EA_weights <- read_csv(file.path(ROOT, "Survey Weights/output/weight_2010_full_results.csv"))
 
   demographics <- read_csv(file.path(ROOT, "Public Use Dataset/Modules/Demographics dataset.csv"))
-  
   primary_secondary_cooking <- read_csv(file.path(ROOT,"Public Use Dataset/Modules/Primary and secondary cooking practices dataset.csv"))
+  house_structure <- read_csv(file.path(ROOT, "Public Use Dataset/Modules/House structure (non randomized).csv"))
+
+  gss <- read_excel(file.path(ROOT, "Survey Weights/input/gss_2021.xlsx"))
 }
 
 ```
 
 ## Recalculating Linnea and Flavio's weights in R
-```{r}
+```{r, message=FALSE, warning=FALSE}
 LW_EA_weights <- GL_EA_weights %>%
   select(!prob_1:weight_2010) %>% #remove weighting variables 
   mutate(ea_select_prob = eas_selected/eas_2010, #Prob select the cluster (EA)
@@ -61,7 +67,7 @@ LW_EA_weights <- GL_EA_weights %>%
 ```
 
 ## Joining the demographic and cooking data 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #join the weights to the demographic data
 survey_with_weights <- left_join(demographics, LW_EA_weights, by = c("eacode", "region")) %>%
   filter(!is.na(weight))
@@ -86,16 +92,16 @@ full_survey <- left_join(survey_with_weights, primary_secondary_cooking, by = "h
 ```
 
 ## Adding collapsed region and collapsd primary cooking type 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #collapse some of the regions and fuel types so there are enough in each group ----
 full_survey_collapsed <- full_survey %>%
   
   #collapse region
   mutate(collapsed_region = case_when(
-  region == "Western" | region == "Western North" ~ "west_west_north",
-  region %in% c("Upper East", "Upper West", "North East", 
-                "Northern", "Savannah", "Oti") ~ "northern_regions",
-  region %in% c("Bono", "Bono East", "Ahafo") ~ "mid_west_regions",
+  region %in% c("Ashanti", "Eastern") ~ "middle",
+  region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti", "Bono", "Bono East", "Ahafo") ~ "northern",
+  region %in% c("Greater Accra", "Volta") ~ "southeast",
+  region %in% c("Central", "Western", "Western North") ~ "southwest",
   TRUE ~ region)) %>%
   
   #collapse fuel type
@@ -110,13 +116,14 @@ full_survey_collapsed <- full_survey %>%
 
 
 ## Setting up the initial survey design 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 # Survey design using survey package
 survey_design <- svydesign(id=~eacode, #specify clusters 
-                           fpc= ~fpc, #include finite population correction (GL and FM calculations)
                            weights= ~weight, #specify the survey weights
                            strata= ~region, #specify the region strata
                            data=full_survey_collapsed)
+
+#fpc not included as sampling less than 5% population of EAs
 ```
 
 
@@ -124,95 +131,129 @@ survey_design <- svydesign(id=~eacode, #specify clusters
 
 ## National population totals 
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 ### urban/rural total
-pop.urban_rural_str <- data.frame(urban_rural_str=c("urban", "rural"), Freq=c(5090702, 3254711))
+pop.urban_rural_str <-
+  data.frame(
+    urban_rural_str = c("urban", "rural"),
+    Freq = c(
+      subset(gss, region == "Total")$hh_pop_urban,
+      subset(gss, region == "Total")$hh_pop_rural
+    )
+  )
 ```
 
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 ### LPG main total
-pop.LPG_main <- data.frame(LPG_main = c("Yes", "No"), Freq = c(3079458, 5265956))
+hh_pop_tot <- subset(gss, region == "Total")$hh_pop
+
+frac_lpg <- subset(gss, region == "Total")$fuel_lpg / subset(gss, region == "Total")$hh_pop_fuel
+
+pop.LPG_main <-
+  data.frame(
+    LPG_main = c("Yes", "No"),
+    Freq = c(frac_lpg * hh_pop_tot,
+             (1 - frac_lpg) * hh_pop_tot)
+  )
 ```
 
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 ### charcoal/wood main total 
-pop.CW_main <- data.frame(CW_main = c("Yes", "No"), Freq = c(4531560, 3813854))
+
+frac_CW <- (subset(gss, region == "Total")$fuel_wood + 
+              subset(gss, region == "Total")$fuel_char) / subset(gss, region == "Total")$hh_pop_fuel
+
+pop.CW_main <-
+  data.frame(
+    CW_main = c("Yes", "No"),
+    Freq = c(frac_CW * hh_pop_tot,
+             (1 - frac_CW) * hh_pop_tot)
+  )
 ```
 
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 ### primary fuel categories 
-pop.primary_fuel <- data.frame(collapsed_fuel = c("none_other", "wood", "LPG", "charcoal"), Freq = c(732934, 2594937, 3086324, 1942771))
+
+frac_char <- subset(gss, region == "Total")$fuel_char / subset(gss, region == "Total")$hh_pop_fuel
+frac_wood <- subset(gss, region == "Total")$fuel_wood / subset(gss, region == "Total")$hh_pop_fuel
+  
+pop.primary_fuel <-
+  data.frame(
+    collapsed_fuel = c("none_other", "wood", "LPG", "charcoal"),
+    Freq = c(
+      round((1 - (frac_lpg + frac_wood + frac_char)) * hh_pop_tot, 0),
+      round(frac_wood * hh_pop_tot, 0),
+      round(frac_lpg * hh_pop_tot, 0),
+      round(frac_char * hh_pop_tot, 0)
+    )
+  )
+
 ```
 
 ## Regional population totals 
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 ### regional 2021 HH populations 
+
+gss_regional <- filter(gss, region != "Total") 
+
 pop.region_hh <- data.frame(
-  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
-  Freq = c(621349, 838493, 1702160, 491373, 881328, 1523101, 240086, 152801, 317994, 288725, 174031, 437934, 133114, 108088, 264404, 190193))
+  region = gss_regional$region,
+  Freq = gss_regional$hh_pop
+)
 ```
 
 
 ### regional LPG_main fuel 
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 # calculating LPG as main fuel for each region
 
-#regional HH populations
-hh_pop = c(621349, 838493, 1702160, 491373, 881328, 1523101, 240086, 152801, 317994, 288725, 174031, 437934, 133114, 108088, 264404, 190193)
-
-#percent using LPG as main source of cooking fuel
-LPG_percent = c(0.377, 0.371, 0.682, 0.337, 0.335, 0.381, 0.178, 0.205, 0.279, 0.167, 0.102, 0.104, 0.043, 0.042, 0.138, 0.120)
-
-#HH main fuel LPG for each region
-LPG_main_region = round(hh_pop * LPG_percent, 0)
-
-#reformat
-pop.region_LPG <- data.frame(
-  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
-  Freq = hh_pop,
-  LPG_percent = LPG_percent
-) %>%
-  mutate(LPG_yes = round(Freq*LPG_percent, 0),
-         LPG_no = round(Freq*(1-LPG_percent), 0)) %>%
-  select(region, LPG_yes, LPG_no) 
+pop.region_LPG <- gss_regional %>% 
+  mutate(lpg_frac = fuel_lpg / hh_pop_fuel,
+         LPG_yes = round(lpg_frac*hh_pop, 0),
+         LPG_no = round((1-lpg_frac)*hh_pop), 0) %>%
+  select(region, LPG_yes, LPG_no)
 
 
-# get population LPG usage for each region of the collapsed regions ----
-west_west_north <- pop.region_LPG %>%
-  filter(region %in% c("Western", "Western North")) %>%
+northern <- pop.region_LPG %>%
+  filter(region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti", "Bono", "Bono East", "Ahafo")) %>%
   summarise(
-    region = "west_west_north",
+    region = "northern",
     LPG_yes = sum(LPG_yes),
     LPG_no = sum(LPG_no)
   )
 
-north_regions <- pop.region_LPG %>%
-  filter(region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti")) %>%
+
+middle <- pop.region_LPG %>%
+  filter(region %in% c("Ashanti", "Eastern")) %>%
   summarise(
-    region = "northern_regions",
+    region = "middle",
     LPG_yes = sum(LPG_yes),
     LPG_no = sum(LPG_no)
   )
 
-midwest_regions <- pop.region_LPG %>%
-  filter(region %in% c("Bono", "Bono East", "Ahafo")) %>%
+southeast <- pop.region_LPG %>%
+  filter(region %in% c("Greater Accra", "Volta")) %>%
   summarise(
-    region = "mid_west_regions",
+    region = "southeast",
     LPG_yes = sum(LPG_yes),
     LPG_no = sum(LPG_no)
   )
 
-#get dataset with all of the large regions that didn't need to be combined ----
-large_regions <- pop.region_LPG %>%
-  filter(region %in% c("Eastern", "Central", "Greater Accra", "Ashanti", "Volta"))
+southwest <- pop.region_LPG %>%
+  filter(region %in% c("Central", "Western", "Western North")) %>%
+  summarise(
+    region = "southwest",
+    LPG_yes = sum(LPG_yes),
+    LPG_no = sum(LPG_no)
+  )
 
-collapsed_region_LPG <- bind_rows(west_west_north, north_regions, midwest_regions, large_regions)
 
+collapsed_region_LPG <- bind_rows(northern, middle, southeast, southwest)
 
 #Combine LPG yes/no columns with each row specifying which is applicable 
 pop_LPG_region_long <- collapsed_region_LPG %>%
@@ -231,58 +272,51 @@ pop.table_LPG <- xtabs(~collapsed_region+LPG_main, pop_LPG_region_long)
 ```
 
 ### regional charcoal/wood main fuel 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 # calculating charcoal/wood (CW) as main fuel for each region
 
-#regional HH population
-hh_pop = c(621349, 838493, 1702160, 491373, 881328, 1523101, 240086, 152801, 317994, 288725, 174031, 437934, 133114, 108088, 264404, 190193)
-
-#percent using charcoal or wood as main cooking fuel source
-CW_percent = c(0.506, 0.547, 0.227, 0.621, 0.586, 0.508, 0.742, 0.707, 0.620, 0.750, 0.848, 0.829, 0.881, 0.931, 0.759, 0.828)
-
-#number HH using CW for main cooking fuel
-CW_main_region = round(hh_pop * CW_percent, 0)
-
-pop.region_CW <- data.frame(
-  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
-  Freq = hh_pop,
-  CW_percent = CW_percent
-) %>%
-  mutate(CW_yes = round(Freq*CW_percent, 0),
-         CW_no = round(Freq*(1-CW_percent), 0)) %>%
-  select(region, CW_yes, CW_no) 
+pop.region_CW <- gss_regional %>% 
+  mutate(CW_frac = (fuel_char + fuel_wood) / hh_pop_fuel,
+         CW_yes = round(CW_frac*hh_pop, 0),
+         CW_no = round((1-CW_frac)*hh_pop), 0) %>%
+  select(region, CW_yes, CW_no)
 
 
-# get population charcoal and wood usage for each region of the collapsed regions ----
-west_west_north <- pop.region_CW %>%
-  filter(region %in% c("Western", "Western North")) %>%
+
+northern <- pop.region_CW %>%
+  filter(region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti", "Bono", "Bono East", "Ahafo")) %>%
   summarise(
-    region = "west_west_north",
+    region = "northern",
     CW_yes = sum(CW_yes),
     CW_no = sum(CW_no)
   )
 
-north_regions <- pop.region_CW %>%
-  filter(region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti")) %>%
+
+middle <- pop.region_CW %>%
+  filter(region %in% c("Ashanti", "Eastern")) %>%
   summarise(
-    region = "northern_regions",
+    region = "middle",
     CW_yes = sum(CW_yes),
     CW_no = sum(CW_no)
   )
 
-midwest_regions <- pop.region_CW %>%
-  filter(region %in% c("Bono", "Bono East", "Ahafo")) %>%
+southeast <- pop.region_CW %>%
+  filter(region %in% c("Greater Accra", "Volta")) %>%
   summarise(
-    region = "mid_west_regions",
+    region = "southeast",
     CW_yes = sum(CW_yes),
     CW_no = sum(CW_no)
   )
 
-#get dataset with all of the large regions that didn't need to be combined ----
-large_regions <- pop.region_CW %>%
-  filter(region %in% c("Eastern", "Central", "Greater Accra", "Ashanti", "Volta"))
+southwest <- pop.region_CW %>%
+  filter(region %in% c("Central", "Western", "Western North")) %>%
+  summarise(
+    region = "southwest",
+    CW_yes = sum(CW_yes),
+    CW_no = sum(CW_no)
+  )
 
-collapsed_region_CW <- bind_rows(west_west_north, north_regions, midwest_regions, large_regions)
+collapsed_region_CW <- bind_rows(northern, middle, southeast, southwest)
 
 
 #Combine CW yes/no columns with each row specifying which is applicable 
@@ -302,64 +336,63 @@ pop.table_CW <- xtabs(~collapsed_region+CW_main, pop_CW_region_long)
 ```
 
 ### regional main fuel
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #specify known main fuel population values for each of the regions 
-none = c(68717,64761,140709,19124,64243,158757,18141,12857,30469,22818,8238,24587,9615,2480,7088,9240)
+pop.region_main_fuel <- gss_regional %>% 
+  mutate(none_other = fuel_none + fuel_other) %>%
+  rename(LPG = fuel_lpg, 
+         wood = fuel_wood, 
+         charcoal = fuel_char) %>%
+  select(region, none_other, wood, LPG, charcoal) %>%
   
-wood = c(186438,218835,36216,163840,282771,356872,143400,79069,141686,138749,109925,278929,91769,89764,159442,117232)
-  
-LPG = c(234023,311238,1157759,165592,295140,579078,42713,31282,88699,48228,17780,45379,5768,4579,36339,22727)
+  #apply scaling factor so population matches GSS total value
+  mutate(none_other = round(none_other * subset(gss, region == "Total")$hh_pop/subset(gss, region == "Total")$hh_pop_fuel, 0),
+         LPG = round(LPG * subset(gss, region == "Total")$hh_pop/subset(gss, region == "Total")$hh_pop_fuel,0),
+         wood = round(wood * subset(gss, region == "Total")$hh_pop/subset(gss, region == "Total")$hh_pop_fuel, 0),
+         charcoal = round(charcoal * subset(gss, region == "Total")$hh_pop/subset(gss, region == "Total")$hh_pop_fuel, 0))
 
-charcoal = c(127558,239318,349266,141057,233782,416047,34646,28904,55242,77728,37579,84153,25421,10854,41005,40211)
-
-other <- c(620787,837879,1698374,491091,880838,1521844,239948,152690,317864,288506,173924,437788,133045,108053,264246,190089) - none - wood - LPG - charcoal
-
-
-pop.region_main_fuel <- data.frame(
-  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
-  
-  none_other = none + other, #needed to recombine none and other for counts
-  wood = wood,
-  LPG = LPG,
-  charcoal = charcoal)
-
-
-# get population main fuel usage for each region of the collapsed regions ----
-west_west_north <- pop.region_main_fuel %>%
-  filter(region %in% c("Western", "Western North")) %>%
+northern <- pop.region_main_fuel %>%
+  filter(region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti", "Bono", "Bono East", "Ahafo")) %>%
   summarise(
-    region = "west_west_north",
+    region = "northern",
     none_other = sum(none_other),
     wood = sum(wood),
     LPG = sum(LPG),
     charcoal = sum(charcoal)
   )
 
-north_regions <- pop.region_main_fuel %>%
-  filter(region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti")) %>%
+
+middle <- pop.region_main_fuel %>%
+  filter(region %in% c("Ashanti", "Eastern")) %>%
   summarise(
-    region = "northern_regions",
+    region = "middle",
     none_other = sum(none_other),
     wood = sum(wood),
     LPG = sum(LPG),
     charcoal = sum(charcoal)
   )
 
-midwest_regions <- pop.region_main_fuel %>%
-  filter(region %in% c("Bono", "Bono East", "Ahafo")) %>%
+southeast <- pop.region_main_fuel %>%
+  filter(region %in% c("Greater Accra", "Volta")) %>%
   summarise(
-    region = "mid_west_regions",
+    region = "southeast",
     none_other = sum(none_other),
     wood = sum(wood),
     LPG = sum(LPG),
     charcoal = sum(charcoal)
   )
 
-#get dataset with all of the large regions that didn't need to be combined ----
-large_regions <- pop.region_main_fuel %>%
-  filter(region %in% c("Eastern", "Central", "Greater Accra", "Ashanti", "Volta"))
+southwest <- pop.region_main_fuel %>%
+  filter(region %in% c("Central", "Western", "Western North")) %>%
+  summarise(
+    region = "southwest",
+    none_other = sum(none_other),
+    wood = sum(wood),
+    LPG = sum(LPG),
+    charcoal = sum(charcoal)
+  )
 
-collapsed_region_primary_fuel <- bind_rows(west_west_north, north_regions, midwest_regions, large_regions)
+collapsed_region_primary_fuel <- bind_rows(northern, middle, southeast, southwest)
 
 
 #Combine primary fuel with each row specifying which is applicable 
@@ -376,46 +409,48 @@ pop.table_primary_fuel <- xtabs(~collapsed_region+collapsed_fuel, pop_region_pri
 ```
 
 ### regional urban/rural 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #regional 2021 HH populations 
-pop.region_urban_rural_hh <- data.frame(
-  region = c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West"), 
-  rural = c(292842, 344366, 123225, 277898, 413370, 566043,
-  162918, 73304, 120206, 123162, 112719, 201727, 89556, 69922, 189290, 129218),
-  urban = c(328507, 494127, 1578935, 213475, 467958, 957058,
-  77168, 79497, 197788, 165563, 61312, 236207, 43558, 38166, 75114, 60975))
+pop.region_urban_rural_hh <- gss_regional %>%
+  select(region, hh_pop_rural, hh_pop_urban) %>%
+  rename(rural = hh_pop_rural, 
+         urban = hh_pop_urban)
 
 
-# get population urban/rural split for each region of the collapsed regions ----
-west_west_north <- pop.region_urban_rural_hh %>%
-  filter(region %in% c("Western", "Western North")) %>%
+northern <- pop.region_urban_rural_hh %>%
+  filter(region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti", "Bono", "Bono East", "Ahafo")) %>%
   summarise(
-    region = "west_west_north",
+    region = "northern",
     urban = sum(urban),
     rural = sum(rural)
   )
 
-north_regions <- pop.region_urban_rural_hh %>%
-  filter(region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti")) %>%
+
+middle <- pop.region_urban_rural_hh %>%
+  filter(region %in% c("Ashanti", "Eastern")) %>%
   summarise(
-    region = "northern_regions",
+    region = "middle",
     urban = sum(urban),
     rural = sum(rural)
   )
 
-midwest_regions <- pop.region_urban_rural_hh %>%
-  filter(region %in% c("Bono", "Bono East", "Ahafo")) %>%
+southeast <- pop.region_urban_rural_hh %>%
+  filter(region %in% c("Greater Accra", "Volta")) %>%
   summarise(
-    region = "mid_west_regions",
+    region = "southeast",
     urban = sum(urban),
     rural = sum(rural)
   )
 
-#get dataset with all of the large regions that didn't need to be combined ----
-large_regions <- pop.region_urban_rural_hh %>%
-  filter(region %in% c("Eastern", "Central", "Greater Accra", "Ashanti", "Volta"))
+southwest <- pop.region_urban_rural_hh %>%
+  filter(region %in% c("Central", "Western", "Western North")) %>%
+  summarise(
+    region = "southwest",
+    urban = sum(urban),
+    rural = sum(rural)
+  )
 
-collapsed_region_urban_rural_hh <- bind_rows(west_west_north, north_regions, midwest_regions, large_regions)
+collapsed_region_urban_rural_hh <- bind_rows(northern, middle, southeast, southwest)
 
 
 #Combine LPG yes/no columns with each row specifying which is applicable 
@@ -433,33 +468,60 @@ pop.table_urban_rural <- xtabs(~collapsed_region+urban_rural_str, pop_region_urb
 
 
 # Setting up the initial survey design
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #specify the initial survey design again
-survey_design <- svydesign(id=~eacode, #specify clusters 
-                           fpc= ~fpc, #include finite population correction (GL and FM calculations)
+survey_design <- svydesign(id=~eacode, #specify clusters
                            weights= ~weight, #specify the survey weights
                            strata= ~region, #specify the region strata
                            data=full_survey_collapsed)
-
-#summary(weights(survey_design))
-
-# Create a replicate-weights survey design object from a traditional strata/cluster survey design object. Doesn't appear to work with weight trimming. 
-replicate_survey_design <- as.svrepdesign(survey_design)
-
-#summary(weights(replicate_survey_design, type = "sampling"))
 ```
 
-# RAKE 1
-```{r}
-#raked_surv <- rake(replicate_survey_design, list(~urban_rural_str, ~LPG_main, ~CW_main), list(pop.urban_rural_str, pop.LPG_main, pop.CW_main))
 
+## Before raking, explore LG + FM base weights
+
+### loop to find main fuel counts for LG + FM weight no raking
+```{r, message=FALSE, warning=FALSE}
+#obtain a list of the regions
+regions <- gss_regional$region
+
+#loop through each of the regions in the list 
+for (i in seq_along(regions)){
+  
+  #subset the survey to the region
+  region_subset = subset(survey_design, region == regions[i])
+  
+  #create list of regions populations
+  regions_pop <- pop.region_hh[[2]]
+  
+  #obtain population for specific region in the loop
+  region_pop = regions_pop[i]
+  
+  #get the fuel information for the region
+  region_fuel  <- as.data.frame(svytotal(~collapsed_fuel, 
+                                         design = region_subset, 
+                                         na.rm = TRUE))
+  
+  #obtain just the LPG total for the region 
+  region_lpg <- region_fuel[2,1]
+  
+  #calculate the percent LPG for the region
+  region_pct_lpg <- round((region_lpg/region_pop)*100,1)
+  
+  #print the result for each
+  print(region_pct_lpg)
+}
+```
+
+
+# RAKE 1
+```{r, message=FALSE, warning=FALSE}
 raked_surv <- rake(survey_design, list(~urban_rural_str, ~LPG_main, ~CW_main), list(pop.urban_rural_str, pop.LPG_main, pop.CW_main), control = list(maxit = 38, epsilon = 1))
 
 summary(weights(raked_surv, type = "sampling"))
 ```
 
 ## trimming thr weights
-```{r}
+```{r, message=FALSE, warning=FALSE}
 upper_weight <- mean(weights(raked_surv, type = "sampling")) * 5
 
 #Set up weight trimming
@@ -483,14 +545,9 @@ svymean(~total_hh_num, trimmed_raked_surv, na.rm = TRUE)
 
 
 
-
-
-
-
-
 ## National Population Results from Rake 1
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #total population
 survey::svytotal(c(rep(1, nrow(full_survey))), trimmed_raked_surv)
 
@@ -540,7 +597,7 @@ svytotal(~collapsed_fuel, design = ashanti_sub, na.rm = TRUE)
 
 ## Examine new weights from Rake 1
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #Identify new weights from raking process
 raked_weights <- weights(trimmed_raked_surv, type = "sampling")
 
@@ -565,9 +622,6 @@ survey_all_weights %>%
                     labels = c("rake_weight" = "Raked Weight", 
                                "weight" = "Original Weights")) 
 
-
-
-
 #create df with hh_id and weights to be exported
 survey_all_weights_1 <- survey_all_weights %>% select(hh_id, rake_weight) %>%
   mutate(rake_method = 1)
@@ -579,10 +633,9 @@ write_csv(survey_all_weights_1, "rake_1_weights.csv")
 
 
 
-
 # RAKE 2
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #raked_surv <- rake(replicate_survey_design, list(~urban_rural_str, ~LPG_main, ~CW_main, ~region), list(pop.urban_rural_str, pop.LPG_main, pop.CW_main, pop.region_hh))
 
 raked_surv <- rake(survey_design, list(~urban_rural_str, ~LPG_main, ~CW_main, ~region), list(pop.urban_rural_str, pop.LPG_main, pop.CW_main, pop.region_hh), control = list(maxit = 40, epsilon = 1))
@@ -595,7 +648,7 @@ trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
 
 ## National Population Results from Rake 2
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #total population
 survey::svytotal(c(rep(1, nrow(full_survey))), trimmed_raked_surv)
 
@@ -645,7 +698,7 @@ svytotal(~collapsed_fuel, design = ashanti_sub, na.rm = TRUE)
 
 ## Examine new weights from Rake 2
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #Identify new weights from raking process
 raked_weights <- weights(trimmed_raked_surv, type = "sampling")
 
@@ -681,8 +734,7 @@ write_csv(survey_all_weights_2, "rake_2_weights.csv")
 
 # RAKE 3
 
-```{r}
-# raked_surv <- rake(replicate_survey_design, list(~LPG_main+collapsed_region, ~urban_rural_str), list(pop.table_LPG, pop.urban_rural_str))
+```{r, message=FALSE, warning=FALSE}
 
 raked_surv <- rake(survey_design, list(~LPG_main+collapsed_region, ~urban_rural_str), list(pop.table_LPG, pop.urban_rural_str))
 
@@ -695,7 +747,7 @@ trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
 
 ## National Population Results from Rake 3
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #total population
 survey::svytotal(c(rep(1, nrow(full_survey))), trimmed_raked_surv)
 
@@ -745,7 +797,7 @@ svytotal(~collapsed_fuel, design = ashanti_sub, na.rm = TRUE)
 
 ## Examine new weights from Rake 3
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #Identify new weights from raking process
 raked_weights <- weights(trimmed_raked_surv, type = "sampling")
 
@@ -782,11 +834,7 @@ write_csv(survey_all_weights_3, "rake_3_weights.csv")
 
 # RAKE 4
 
-```{r}
-# raked_surv <- rake(replicate_survey_design, 
-#                    list(~urban_rural_str+collapsed_region, ~collapsed_region+collapsed_fuel), 
-#                    list(pop.table_urban_rural, pop.table_primary_fuel))
-
+```{r, message=FALSE, warning=FALSE}
 raked_surv <- rake(survey_design, 
                    list(~urban_rural_str+collapsed_region, ~collapsed_region+collapsed_fuel), 
                    list(pop.table_urban_rural, pop.table_primary_fuel), control = list(maxit = 15, epsilon = 1))
@@ -799,7 +847,7 @@ trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
 
 ## National Population Results from Rake 4
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #total population
 survey::svytotal(c(rep(1, nrow(full_survey))), trimmed_raked_surv)
 
@@ -854,9 +902,44 @@ svymean(~house_rooms, design = trimmed_raked_surv, na.rm = TRUE)
 
 ```
 
+## loop to find main fuel counts 
+
+```{r, message=FALSE, warning=FALSE}
+#obtain a list of the regions
+regions <- gss_regional$region
+
+#loop through each of the regions in the list 
+for (i in seq_along(regions)){
+  
+  #subset the raked survey to the region
+  region_subset = subset(trimmed_raked_surv, region == regions[i])
+  
+  #create list of regions populations
+  regions_pop <- pop.region_hh[[2]]
+  
+  #obtain population for specific region in the loop
+  region_pop = regions_pop[i]
+  
+  #get the fuel information for the region
+  region_fuel  <- as.data.frame(svytotal(~collapsed_fuel, 
+                                         design = region_subset, 
+                                         na.rm = TRUE))
+  
+  #obtain just the LPG total for the region 
+  region_lpg <- region_fuel[2,1]
+  
+  #calculate the percent LPG for the region
+  region_pct_lpg <- round((region_lpg/region_pop)*100,1)
+  
+  #print the result for each
+  print(region_pct_lpg)
+}
+```
+
+
 ## Examine new weights from Rake 4
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #Identify new weights from raking process
 raked_weights <- weights(trimmed_raked_surv, type = "sampling")
 
@@ -893,9 +976,7 @@ write_csv(survey_all_weights_4, "rake_4_weights.csv")
 
 # RAKE 5b
 
-```{r}
-#raked_surv <- rake(replicate_survey_design, list(~urban_rural_str, ~LPG_main, ~CW_main, ~region), list(pop.urban_rural_str, pop.LPG_main, pop.CW_main, pop.region_hh))
-
+```{r, message=FALSE, warning=FALSE}
 raked_surv <- rake(survey_design, list(~urban_rural_str, ~collapsed_fuel, ~region), list(pop.urban_rural_str, pop.primary_fuel, pop.region_hh), control = list(maxit = 20, epsilon = 1, verbose = FALSE))
 
 upper_weight <- mean(weights(raked_surv, type = "sampling")) * 5
@@ -906,7 +987,7 @@ trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
 
 ## National Population Results from Rake 5b
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #total population
 survey::svytotal(c(rep(1, nrow(full_survey))), trimmed_raked_surv)
 
@@ -962,9 +1043,44 @@ svymean(~house_rooms, design = trimmed_raked_surv, na.rm = TRUE)
 svymean(~house_rooms, design = survey_design, na.rm = TRUE)
 ```
 
+## loop to find main fuel counts 
+
+```{r, message=FALSE, warning=FALSE}
+#obtain a list of the regions
+regions <- gss_regional$region
+
+#loop through each of the regions in the list 
+for (i in seq_along(regions)){
+  
+  #subset the raked survey to the region
+  region_subset = subset(trimmed_raked_surv, region == regions[i])
+  
+  #create list of regions populations
+  regions_pop <- pop.region_hh[[2]]
+  
+  #obtain population for specific region in the loop
+  region_pop = regions_pop[i]
+  
+  #get the fuel information for the region
+  region_fuel  <- as.data.frame(svytotal(~collapsed_fuel, 
+                                         design = region_subset, 
+                                         na.rm = TRUE))
+  
+  #obtain just the LPG total for the region 
+  region_lpg <- region_fuel[2,1]
+  
+  #calculate the percent LPG for the region
+  region_pct_lpg <- round((region_lpg/region_pop)*100,1)
+  
+  #print the result for each
+  print(region_pct_lpg)
+}
+```
+
+
 ## Examine new weights from Rake 5b
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #Identify new weights from raking process
 raked_weights <- weights(trimmed_raked_surv, type = "sampling")
 
@@ -1003,12 +1119,7 @@ write_csv(survey_all_weights_5b, "rake_5b_weights.csv")
 
 # RAKE 7
 
-```{r}
-# raked_surv <- rake(replicate_survey_design, 
-#                    list(~urban_rural_str, ~region), 
-#                    list(pop.urban_rural_str, pop.region_hh)
-#                    )
-
+```{r, message=FALSE, warning=FALSE}
 raked_surv <- rake(survey_design, 
                    list(~urban_rural_str, ~region), 
                    list(pop.urban_rural_str, pop.region_hh)
@@ -1022,7 +1133,7 @@ trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
 
 ## National Population Results from Rake 7
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #total population
 survey::svytotal(c(rep(1, nrow(full_survey))), trimmed_raked_surv)
 
@@ -1076,9 +1187,44 @@ svytotal(~hh_water_source, design = trimmed_raked_surv, na.rm = TRUE)
 svymean(~house_rooms, design = trimmed_raked_surv, na.rm = TRUE)
 ```
 
+## loop to find main fuel counts 
+
+```{r, message=FALSE, warning=FALSE}
+#obtain a list of the regions
+regions <- gss_regional$region
+
+#loop through each of the regions in the list 
+for (i in seq_along(regions)){
+  
+  #subset the raked survey to the region
+  region_subset = subset(trimmed_raked_surv, region == regions[i])
+  
+  #create list of regions populations
+  regions_pop <- pop.region_hh[[2]]
+  
+  #obtain population for specific region in the loop
+  region_pop = regions_pop[i]
+  
+  #get the fuel information for the region
+  region_fuel  <- as.data.frame(svytotal(~collapsed_fuel, 
+                                         design = region_subset, 
+                                         na.rm = TRUE))
+  
+  #obtain just the LPG total for the region 
+  region_lpg <- region_fuel[2,1]
+  
+  #calculate the percent LPG for the region
+  region_pct_lpg <- round((region_lpg/region_pop)*100,1)
+  
+  #print the result for each
+  print(region_pct_lpg)
+}
+```
+
+
 ## Examine new weights from Rake 7
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #Identify new weights from raking process
 raked_weights <- weights(trimmed_raked_surv, type = "sampling")
 
@@ -1114,7 +1260,7 @@ write_csv(survey_all_weights_7, "rake_7_weights.csv")
 
 # RAKE 8
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 raked_surv <- rake(survey_design, 
                    list(~urban_rural_str+collapsed_region), 
                    list(pop.table_urban_rural)
@@ -1128,7 +1274,7 @@ trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
 
 ## National Population Results from Rake 8
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #total population
 survey::svytotal(c(rep(1, nrow(full_survey))), trimmed_raked_surv)
 
@@ -1182,9 +1328,43 @@ svytotal(~hh_water_source, design = trimmed_raked_surv, na.rm = TRUE)
 svymean(~house_rooms, design = trimmed_raked_surv, na.rm = TRUE)
 ```
 
+## loop to find main fuel counts 
+
+```{r, message=FALSE, warning=FALSE}
+#obtain a list of the regions
+regions <- gss_regional$region
+
+#loop through each of the regions in the list 
+for (i in seq_along(regions)){
+  
+  #subset the raked survey to the region
+  region_subset = subset(trimmed_raked_surv, region == regions[i])
+  
+  #create list of regions populations
+  regions_pop <- pop.region_hh[[2]]
+  
+  #obtain population for specific region in the loop
+  region_pop = regions_pop[i]
+  
+  #get the fuel information for the region
+  region_fuel  <- as.data.frame(svytotal(~collapsed_fuel, 
+                                         design = region_subset, 
+                                         na.rm = TRUE))
+  
+  #obtain just the LPG total for the region 
+  region_lpg <- region_fuel[2,1]
+  
+  #calculate the percent LPG for the region
+  region_pct_lpg <- round((region_lpg/region_pop)*100,1)
+  
+  #print the result for each
+  print(region_pct_lpg)
+}
+```
+
 ## Examine new weights from Rake 8
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #Identify new weights from raking process
 raked_weights <- weights(trimmed_raked_surv, type = "sampling")
 
@@ -1223,7 +1403,7 @@ write_csv(survey_all_weights_8, "rake_8_weights.csv")
 
 # Rake 9 ~ starting with equal weights (i.e. don't use GL + FM calculated weights)
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #specify the initial survey design again
 survey_design <- svydesign(id=~eacode, #specify clusters 
                           # fpc= ~fpc, #include finite population correction (GL and FM calculations)
@@ -1232,7 +1412,7 @@ survey_design <- svydesign(id=~eacode, #specify clusters
                            data=full_survey_collapsed)
 ```
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 raked_surv <- rake(survey_design, list(~urban_rural_str, ~collapsed_fuel, ~region), list(pop.urban_rural_str, pop.primary_fuel, pop.region_hh), control = list(maxit = 15, epsilon = 1))
 
 upper_weight <- mean(weights(raked_surv, type = "sampling")) * 5
@@ -1243,7 +1423,7 @@ trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
 
 ## National Population Results from Rake 9
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #total population
 survey::svytotal(c(rep(1, nrow(full_survey))), trimmed_raked_surv)
 
@@ -1293,7 +1473,7 @@ svytotal(~collapsed_fuel, design = ashanti_sub, na.rm = TRUE)
 
 ## Examine new weights from Rake 9
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #Identify new weights from raking process
 raked_weights <- weights(trimmed_raked_surv, type = "sampling")
 
@@ -1328,7 +1508,7 @@ write_csv(survey_all_weights_9, "rake_9_weights.csv")
 
 # Rake 10 ~ starting with equal weights (i.e. don't use GL + FM calculated weights)
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #specify the initial survey design again
 survey_design <- svydesign(id=~eacode, #specify clusters 
                           # fpc= ~fpc, #include finite population correction (GL and FM calculations)
@@ -1337,7 +1517,7 @@ survey_design <- svydesign(id=~eacode, #specify clusters
                            data=full_survey_collapsed)
 ```
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 raked_surv <- rake(survey_design, list(~urban_rural_str+collapsed_region), list(pop.table_urban_rural))
 
 upper_weight <- mean(weights(raked_surv, type = "sampling")) * 5
@@ -1348,7 +1528,7 @@ trimmed_raked_surv <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
 
 ## National Population Results from Rake 10
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #total population
 survey::svytotal(c(rep(1, nrow(full_survey))), trimmed_raked_surv)
 
@@ -1398,7 +1578,7 @@ svytotal(~collapsed_fuel, design = ashanti_sub, na.rm = TRUE)
 
 ## Examine new weights from Rake 10
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #Identify new weights from raking process
 raked_weights <- weights(trimmed_raked_surv, type = "sampling")
 
@@ -1433,9 +1613,10 @@ write_csv(survey_all_weights_10, "rake_10_weights.csv")
 
 
 
+
 # Joining all the weights together
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 #bind all the dataframe together
 all_rake_weights <- bind_rows(survey_all_weights_1, survey_all_weights_2, survey_all_weights_3, survey_all_weights_4, survey_all_weights_5b, survey_all_weights_7, survey_all_weights_8, survey_all_weights_9, survey_all_weights_10)
 
@@ -1444,7 +1625,7 @@ all_rake_weights_wide <- all_rake_weights %>%
   pivot_wider(names_from = rake_method, values_from = rake_weight, names_prefix = "rake_method_")
 
 # Write to a CSV file
-write_csv(all_rake_weights_wide, "full_rake_weights.csv")
-
+write_csv(all_rake_weights_wide, "full_rake_weights_GL.csv")
 ```
+
 
