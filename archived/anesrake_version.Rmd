@@ -1,0 +1,513 @@
+---
+title: "anesrake weights"
+author: "Lewis White"
+date: "2023-11-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## load libraries
+```{r}
+library(tidyverse)
+library(survey)
+library(anesrake)
+```
+
+## Set working directory 
+```{r}
+setwd("/Users/lewiswhite/CHAP_columbia/CHAP_survey_weights")
+```
+
+## Loading in the data
+```{r}
+#includes the weights from Linnea and Flavio's V4 weights 
+GL_EA_weights <- read_csv("data/weight_2010_full_results.csv")
+
+#responses to the survey
+demographics <- read_csv("data/Demographics dataset.csv")
+
+#cooking survey
+primary_secondary_cooking <- read_csv("data/Primary and secondary cooking practices dataset.csv")
+```
+
+## Recalculating Linnea and Flavio's weights in R
+```{r}
+LW_EA_weights <- GL_EA_weights %>%
+  select(!prob_1:weight_2010) %>% #remove weighting variables 
+  mutate(ea_select_prob = eas_selected/eas_2010, #Prob select the cluster (EA)
+         hh_select_within_ea_prob = 20/ea_hhs_2010) %>% #Prob select HH within each EA
+  mutate(hh_select_prob = ea_select_prob * hh_select_within_ea_prob) %>% #prob select HH 
+  mutate(weight = 1/hh_select_prob) #obtain weight
+```
+
+## Joining the demographic and cooking data 
+```{r}
+#join the weights to the demographic data
+survey_with_weights <- left_join(demographics, LW_EA_weights, by = c("eacode", "region")) %>%
+  filter(!is.na(weight))
+
+#add the cooking data
+full_survey <- left_join(survey_with_weights, primary_secondary_cooking, by = "hh_id") %>%
+  
+  #add LPG main cookstove column
+  mutate(LPG_main = ifelse(primary_cookstove == "Gas:(LPG)/cooking gas stove", "Yes", "No")) %>%
+  
+  #add charcoal/wood main cookstove column
+  mutate(CW_main = ifelse(primary_cookstove == "3-stone stove/open fire" | primary_cookstove == "Charcoal stove", "Yes", "No")) %>%
+  
+  #change NA values in charcoal/lpg main to "No". These respondents skipped over this question bc they don't cook
+  mutate(LPG_main = coalesce(LPG_main, "No"),
+         CW_main = coalesce(CW_main, "No"))
+```
+
+## Collapsing region and primary cooking type 
+```{r}
+#collapse some of the regions and fuel types so there are enough in each group ----
+full_survey_collapsed <- full_survey %>%
+  
+  #collapse region
+  mutate(collapsed_region = case_when(
+  region == "Western" | region == "Western North" ~ "west_west_north",
+  region %in% c("Upper East", "Upper West", "North East", 
+                "Northern", "Savannah", "Oti") ~ "northern_regions",
+  region %in% c("Bono", "Bono East", "Ahafo") ~ "mid_west_regions",
+  TRUE ~ region)) %>%
+  
+  #collapse fuel type
+  mutate(collapsed_fuel = case_when(
+    primary_cookstove == "Gas:(LPG)/cooking gas stove" ~ "LPG",
+    primary_cookstove == "Charcoal stove" ~ "charcoal",
+    primary_cookstove == "3-stone stove/open fire" ~ "wood",
+    is.na(primary_cookstove) ~ "none_other",
+    TRUE ~ "none_other"
+  )) %>%
+
+  #FOR ANESRAKE, IT IS ESSENTIAL THAT THE COLUMNS ARE OF CLASS FACTOR
+  mutate(urban_rural_str = as.factor(urban_rural_str), 
+         collapsed_fuel = as.factor(collapsed_fuel),
+         region = as.factor(region)) %>%
+  
+  as.data.frame() #FOR ANESRAKE, IT IS ESSENTIAL THAT THE DATA IS IN THIS FORMAT, NOT TIBBLE DF
+```
+
+
+# Rake 5: Anesrake with national urban/rural split, national fuel use, and 2021 population in each region 
+
+## population proportions 
+
+```{r}
+# Set target variables 
+
+#FUEL
+collapsed_fuel <- c('none_other', 'wood', 'LPG', 'charcoal')
+collapsed_fuel_freq = c(732934, 2594937, 3086324, 1942771)
+collapsed_fuel_prop <- collapsed_fuel_freq/sum(collapsed_fuel_freq)
+
+collapsed_fuel_df <- data_frame(collapsed_fuel, collapsed_fuel_prop) %>%
+  mutate(collapsed_fuel = as.factor(collapsed_fuel))
+
+#LOCALITY
+urban_rural_str <- c('urban', 'rural')
+urban_rural_str_freq <- c(5090702, 3254711)
+urban_rural_str_prop <- urban_rural_str_freq/sum(urban_rural_str_freq)
+
+urban_rural_str_df <- data_frame(urban_rural_str, urban_rural_str_prop) %>%
+  mutate(urban_rural_str = as.factor(urban_rural_str))
+
+#REGION
+region <- c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West")
+region_freq <- c(621349, 838493, 1702160, 491373, 881328, 1523101, 240086, 152801, 317994, 288725, 174031, 437934, 133114, 108088, 264404, 190193)
+region_prop <- region_freq/sum(region_freq)
+
+region_df <- data_frame(region, region_prop) %>%
+  mutate(region = as.factor(region))
+
+
+#set up target list of proportions for each variable of interest
+target <- list(
+  
+  collapsed_fuel = weights::wpct(collapsed_fuel_df$collapsed_fuel, collapsed_fuel_df$collapsed_fuel_prop),
+  
+  urban_rural_str = weights::wpct(urban_rural_str_df$urban_rural_str, urban_rural_str_df$urban_rural_str_prop),
+  
+  region = weights::wpct(region_df$region, region_df$region_prop)
+)
+
+#make sure names of the variables in the list match the survey data
+names(target) <- c("collapsed_fuel", "urban_rural_str", "region")
+```
+
+# check out survey proportions for the same variables
+```{r}
+weights::wpct(full_survey_collapsed$collapsed_fuel)
+
+weights::wpct(full_survey_collapsed$urban_rural_str)
+
+weights::wpct(full_survey_collapsed$region)
+```
+
+# complete the raking
+```{r}
+CHAP_raking <- anesrake(target,            # target list identified above
+                    full_survey_collapsed,              # survey dataset 
+                    full_survey_collapsed$hh_id,    # unique identifier for each respondent
+                    cap = 5,  # Maximum value for any given weight
+                    weightvec = full_survey_collapsed$weight, #initial weights
+                    choosemethod = "total",       # How are parameters compared for selection (other options include 'average' and 'max')
+                    type = "pctlim",              # What targets should be used to weight 
+                    pctlim = 0.05                 # Threshold for deviation
+                    )
+
+#raking achieved only partial convergence -- no improvement was apparent after 22 iterations
+```
+
+### obtain raking results
+```{r}
+raking_summary <- summary(CHAP_raking)
+```
+
+### check out specific for each target variable
+```{r}
+raking_summary$collapsed_fuel
+
+raking_summary$urban_rural_str
+
+raking_summary$region
+```
+
+### check out design effect
+```{r}
+raking_summary$general.design.effect #weighting caused a 94.9% increase in the variance
+```
+
+## obtain vector of new weights and add them to the full_survey_collapsed df
+```{r}
+caseweights <- data.frame(cases=CHAP_raking$caseid, weights=CHAP_raking$weightvec)
+
+full_survey_collapsed$ames_weights <- CHAP_raking$weightvec
+```
+
+### testing out the results
+```{r}
+#pct urban/rural 
+wpct(full_survey_collapsed$urban_rural_str)
+
+wpct(full_survey_collapsed$urban_rural_str, full_survey_collapsed$ames_weights)
+
+
+#main fuel
+wpct(full_survey_collapsed$collapsed_fuel)
+
+wpct(full_survey_collapsed$collapsed_fuel, full_survey_collapsed$ames_weights)
+
+
+#main fuel urban
+urban <- full_survey_collapsed %>%
+  filter(urban_rural_str == "urban") 
+
+wpct(urban$collapsed_fuel, urban$ames_weights)
+
+#main fuel rural 
+rural <- full_survey_collapsed %>%
+  filter(urban_rural_str == "rural") 
+
+wpct(rural$collapsed_fuel, rural$ames_weights)
+
+#main fuel greater accra
+accra <- full_survey_collapsed %>%
+  filter(region == "Greater Accra") 
+
+wpct(accra$collapsed_fuel, accra$ames_weights)
+
+#main fuel ashanti
+ashanti <- full_survey_collapsed %>%
+  filter(region == "Ashanti") 
+
+wpct(ashanti$collapsed_fuel, ashanti$ames_weights)
+
+
+#hh num ---- 
+hh_nums <- wpct(full_survey_collapsed$total_hh_num, full_survey_collapsed$ames_weights) * 8345414 #calculating the mean hh num feels more complicated than it should
+
+hh_num_seq <- seq(1, 20)
+hh_num_seq <- hh_num_seq[hh_num_seq != 18]
+
+result <- numeric(length(hh_num_seq))
+
+for (i in 1:length(hh_num_seq)) {
+  result[i] <- hh_num_seq[i] * hh_nums[i]
+}
+
+sum(result) / 8345414
+
+
+
+#hh num urban ---- 
+hh_nums_urban <- wpct(urban$total_hh_num, urban$ames_weights) * 5090702 
+
+hh_num_seq_urban <- seq(1, 20)
+hh_num_seq_urban <- hh_num_seq[hh_num_seq != 18 & hh_num_seq != 19]
+
+result <- numeric(length(hh_num_seq_urban))
+
+for (i in 1:length(hh_num_seq_urban)) {
+  result[i] <- hh_num_seq_urban[i] * hh_nums_urban[i]
+}
+
+sum(result) / 5090702
+
+
+#hh num rural ---- 
+hh_nums_rural <- wpct(rural$total_hh_num, rural$ames_weights) * 3254711 
+
+hh_num_seq_rural <- seq(1, 20)
+hh_num_seq_rural <- hh_num_seq[hh_num_seq != 18 & hh_num_seq != 19]
+
+result <- numeric(length(hh_num_seq_rural))
+
+for (i in 1:length(hh_num_seq_rural)) {
+  result[i] <- hh_num_seq_rural[i] * hh_nums_rural[i]
+}
+
+sum(result) / 3254711
+```
+
+## observe weighting to see which combinations lead to strongest weights
+```{r}
+full_survey_collapsed %>% 
+  select(urban_rural_str, collapsed_fuel, region, ames_weights) %>% 
+  unique() %>% 
+  group_by(urban_rural_str, collapsed_fuel, region) %>%
+  summarise(mean_ames_weight = mean(ames_weights)) %>%
+  arrange(-mean_ames_weight)
+
+full_survey_collapsed %>%
+  group_by(urban_rural_str) %>%
+  summarise(n = n(),
+            sum_weights.= sum(ames_weights))
+
+#can multiply all weights by 8345414/7389 (1129.438) to scale to national weighting 
+
+full_survey_collapsed$scaled_ames_weights <- full_survey_collapsed$ames_weights * 1129.438
+
+
+full_survey_collapsed %>%
+  pivot_longer(cols = c(weight, scaled_ames_weights), names_to = "Variable", values_to = "Value") %>%
+  ggplot(aes(x = Value, fill = Variable)) +
+  geom_histogram(bins = 30, position = "identity", alpha = 0.6) +
+  labs(title = "Histogram of Weights: Rake 5",
+       x = "Survey Weight",
+       y = "Frequency",
+       fill = "Weight Origin") +
+  theme_bw() +
+  scale_fill_manual(values = c("scaled_ames_weights" = "#a8605d", 
+                               "weight" = "#7fabc7"),
+                    labels = c("scaled_ames_weights" = "Amesrake", 
+                               "weight" = "Original Weights")) 
+```
+
+
+# Rake 6: Anesrake with national urban/rural split and number of households in each region 2021
+
+## population proportions 
+
+```{r}
+# Set target variables 
+
+#LOCALITY
+urban_rural_str <- c('urban', 'rural')
+urban_rural_str_freq <- c(5090702, 3254711)
+urban_rural_str_prop <- urban_rural_str_freq/sum(urban_rural_str_freq)
+
+urban_rural_str_df <- data_frame(urban_rural_str, urban_rural_str_prop) %>%
+  mutate(urban_rural_str = as.factor(urban_rural_str))
+
+#REGION
+region <- c("Western", "Central", "Greater Accra", "Volta", "Eastern", "Ashanti", "Western North", "Ahafo", "Bono", "Bono East", "Oti", "Northern", "Savannah", "North East", "Upper East", "Upper West")
+region_freq <- c(621349, 838493, 1702160, 491373, 881328, 1523101, 240086, 152801, 317994, 288725, 174031, 437934, 133114, 108088, 264404, 190193)
+region_prop <- region_freq/sum(region_freq)
+
+region_df <- data_frame(region, region_prop) %>%
+  mutate(region = as.factor(region))
+
+
+#set up target list of proportions for each variable of interest
+target <- list(
+  
+  urban_rural_str = weights::wpct(urban_rural_str_df$urban_rural_str, urban_rural_str_df$urban_rural_str_prop),
+  
+  region = weights::wpct(region_df$region, region_df$region_prop)
+)
+
+#make sure names of the variables in the list match the survey data
+names(target) <- c("urban_rural_str", "region")
+```
+
+## check out survey proportions for the same variables
+```{r}
+weights::wpct(full_survey_collapsed$urban_rural_str)
+
+weights::wpct(full_survey_collapsed$region)
+```
+
+## complete the raking
+```{r}
+CHAP_raking <- anesrake(target,            # target list identified above
+                    full_survey_collapsed,              # survey dataset 
+                    full_survey_collapsed$hh_id,    # unique identifier for each respondent
+                    cap = 5,  # Maximum value for any given weight
+                    weightvec = full_survey_collapsed$weight, #initial weights
+                    choosemethod = "total",       # How are parameters compared for selection (other options include 'average' and 'max')
+                    type = "pctlim",              # What targets should be used to weight 
+                    pctlim = 0.05                 # Threshold for deviation
+                    )
+
+#raking converged in 20 iterations
+```
+
+### obtain raking results
+```{r}
+raking_summary <- summary(CHAP_raking)
+```
+
+### check out specific for each target variable
+```{r}
+raking_summary$urban_rural_str
+
+raking_summary$region
+```
+
+### check out design effect
+```{r}
+raking_summary$general.design.effect #weighting caused a 64.9% increase in the variance
+```
+
+## obtain vector of new weights and add them to the full_survey_collapsed df
+```{r}
+caseweights <- data.frame(cases=CHAP_raking$caseid, weights=CHAP_raking$weightvec)
+
+full_survey_collapsed$ames_weights <- CHAP_raking$weightvec
+```
+
+### testing out the results
+```{r}
+#pct urban/rural 
+wpct(full_survey_collapsed$urban_rural_str)
+
+wpct(full_survey_collapsed$urban_rural_str, full_survey_collapsed$ames_weights)
+
+
+#main fuel
+wpct(full_survey_collapsed$collapsed_fuel)
+
+wpct(full_survey_collapsed$collapsed_fuel, full_survey_collapsed$ames_weights)
+
+
+#main fuel urban
+urban <- full_survey_collapsed %>%
+  filter(urban_rural_str == "urban") 
+
+wpct(urban$collapsed_fuel, urban$ames_weights)
+
+#main fuel rural 
+rural <- full_survey_collapsed %>%
+  filter(urban_rural_str == "rural") 
+
+wpct(rural$collapsed_fuel, rural$ames_weights)
+
+#main fuel greater accra
+accra <- full_survey_collapsed %>%
+  filter(region == "Greater Accra") 
+
+wpct(accra$collapsed_fuel, accra$ames_weights)
+
+#main fuel ashanti
+ashanti <- full_survey_collapsed %>%
+  filter(region == "Ashanti") 
+
+wpct(ashanti$collapsed_fuel, ashanti$ames_weights)
+
+
+#hh num ---- 
+hh_nums <- wpct(full_survey_collapsed$total_hh_num, full_survey_collapsed$ames_weights) * 8345414 #calculating the mean hh num feels more complicated than it should
+
+hh_num_seq <- seq(1, 20)
+hh_num_seq <- hh_num_seq[hh_num_seq != 18]
+
+result <- numeric(length(hh_num_seq))
+
+for (i in 1:length(hh_num_seq)) {
+  result[i] <- hh_num_seq[i] * hh_nums[i]
+}
+
+sum(result) / 8345414
+
+
+
+#hh num urban ---- 
+hh_nums_urban <- wpct(urban$total_hh_num, urban$ames_weights) * 5090702 
+
+hh_num_seq_urban <- seq(1, 20)
+hh_num_seq_urban <- hh_num_seq[hh_num_seq != 18 & hh_num_seq != 19]
+
+result <- numeric(length(hh_num_seq_urban))
+
+for (i in 1:length(hh_num_seq_urban)) {
+  result[i] <- hh_num_seq_urban[i] * hh_nums_urban[i]
+}
+
+sum(result) / 5090702
+
+
+#hh num rural ---- 
+hh_nums_rural <- wpct(rural$total_hh_num, rural$ames_weights) * 3254711 
+
+hh_num_seq_rural <- seq(1, 20)
+hh_num_seq_rural <- hh_num_seq[hh_num_seq != 18 & hh_num_seq != 19]
+
+result <- numeric(length(hh_num_seq_rural))
+
+for (i in 1:length(hh_num_seq_rural)) {
+  result[i] <- hh_num_seq_rural[i] * hh_nums_rural[i]
+}
+
+sum(result) / 3254711
+```
+
+## observe weighting to see which combinations lead to strongest weights
+```{r}
+full_survey_collapsed %>% 
+  select(urban_rural_str, collapsed_fuel, region, ames_weights) %>% 
+  unique() %>% 
+  group_by(urban_rural_str, collapsed_fuel, region) %>%
+  summarise(mean_ames_weight = mean(ames_weights)) %>%
+  arrange(-mean_ames_weight)
+
+full_survey_collapsed %>%
+  group_by(urban_rural_str) %>%
+  summarise(n = n(),
+            sum_weights.= sum(ames_weights))
+
+#can multiply all weights by 8345414/7389 (1129.438) to scale to national weighting 
+
+full_survey_collapsed$scaled_ames_weights <- full_survey_collapsed$ames_weights * 1129.438
+
+
+full_survey_collapsed %>%
+  pivot_longer(cols = c(weight, scaled_ames_weights), names_to = "Variable", values_to = "Value") %>%
+  ggplot(aes(x = Value, fill = Variable)) +
+  geom_histogram(bins = 30, position = "identity", alpha = 0.6) +
+  labs(title = "Histogram of Weights: Rake 6",
+       x = "Survey Weight",
+       y = "Frequency",
+       fill = "Weight Origin") +
+  theme_bw() +
+  scale_fill_manual(values = c("scaled_ames_weights" = "#a8605d", 
+                               "weight" = "#7fabc7"),
+                    labels = c("scaled_ames_weights" = "Amesrake", 
+                               "weight" = "Original Weights")) 
+```
