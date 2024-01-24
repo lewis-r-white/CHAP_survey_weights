@@ -1,0 +1,672 @@
+---
+title: "Raking: 4 models automated R calculations"
+author: "Lewis White and Linnea Graham"
+date: "2023-12-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen = 999, digits = 3) # Disable scientific notation and set the number of digits
+```
+
+## load libraries
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(here) #file path management 
+library(survey) #analyzing survey
+library(readxl) #reading excel
+library(DT) #creating tables
+```
+
+## source function
+```{r, message=FALSE, warning=FALSE}
+source(here("calculate_survey_stats.R")) #function that calculates high level survey stats for a number of variables 
+
+source(here("calculate_region_pct_LPG.R")) #function that calculates the main fuel = LPG percentage for each region in our data
+```
+
+
+## Set Paths
+```{r, message=FALSE, warning=FALSE}
+if (Sys.getenv('USER') == "lewiswhite") {
+    
+  # set working directory
+  setwd("/Users/lewiswhite/CHAP_columbia/CHAP_survey_weights")
+  
+  #includes the weights from Linnea and Flavio's V4 weights 
+  GL_EA_weights <- read_csv("weight_2010_full_results.csv")
+  
+  #responses to the survey
+  demographics <- read_csv("Demographics dataset.csv")
+  
+  #cooking survey
+  primary_secondary_cooking <- read_csv("Primary and secondary cooking practices dataset.csv")
+  
+  #house structure
+  house_structure <- read_csv("House structure (non randomized).csv")
+  
+  house_structure_random <- read_csv("House structure (randomized).csv")
+  
+  #lighting 
+  lighting <- read_csv("Lighting.csv")
+  
+  #GSS-2021
+  gss <- read_excel("gss_2021.xlsx")
+     
+}
+
+if (Sys.getenv('USER') == "linneagraham") {
+
+  ROOT <- ("/Volumes/GoogleDrive-100807402805951836278/.shortcut-targets-by-id/1B0iSt7ZGnvhcH8p5MtZccbjg10Pho9qT/ColumbiaWorldProjectsGhana/03_Phase_1/01_Assessment_Household_Needs")
+
+  GL_EA_weights <- read_csv(file.path(ROOT, "Survey Weights/output/weight_2010_full_results.csv"))
+
+  demographics <- read_csv(file.path(ROOT, "Public Use Dataset/Modules/Demographics dataset.csv"))
+  primary_secondary_cooking <- read_csv(file.path(ROOT,"Public Use Dataset/Modules/Primary and secondary cooking practices dataset.csv"))
+  house_structure <- read_csv(file.path(ROOT, "Public Use Dataset/Modules/House structure (non randomized).csv"))
+  
+  house_structure_random <- read_csv(file.path(ROOT, "Public Use Dataset/Modules/House structure (randomized).csv"))
+  
+  lighting <- read_csv(file.path(ROOT, "Public Use Dataset/Modules/Lighting.csv"))
+
+  gss <- read_excel(file.path(ROOT, "Survey Weights/input/gss_2021.xlsx"))
+}
+```
+
+
+## GSS stats 
+```{r, message=FALSE, warning=FALSE}
+#calcualting key stats from the GSS dataset 
+
+gss_totals <- gss %>% filter(region == "Total")
+
+total_households <- gss_totals$hh_pop
+
+hh_size <- gss_totals$avg_hh_size
+
+hh_size_rural <- gss_totals$hh_size_rural
+
+hh_size_urban <- gss_totals$hh_size_urban
+
+pct_rural <- gss_totals$hh_pop_rural / gss_totals$hh_pop * 100
+
+pct_LPG <- gss_totals$fuel_lpg / gss_totals$hh_pop_fuel * 100
+
+pct_CW <- (gss_totals$fuel_wood + gss_totals$fuel_char)/gss_totals$hh_pop_fuel * 100
+
+pct_LPG_urban <- gss_totals$fuel_lpg_urban / gss_totals$hh_pop_urban_fuel * 100
+  
+pct_LPG_rural <- gss_totals$fuel_lpg_rural / gss_totals$hh_pop_rural_fuel * 100
+
+pct_borehole <- gss_totals$water_borehole / gss_totals$hh_pop_water_house * 100
+
+pct_sachet <- gss_totals$water_sachet / gss_totals$hh_pop_water_house * 100
+
+pct_pipe_tap <- gss_totals$water_pipe_tap / gss_totals$hh_pop_water_house * 100
+
+pct_rooms_two_plus <- gss_totals$rooms_two_plus / gss_totals$hh_pop_water_house * 100
+
+pct_sleeping_rooms_two_plus <- gss_totals$sleeping_rooms_two_plus / gss_totals$hh_pop_water_house * 100
+
+pct_sepatate_cooking <- gss_totals$separate_cooking_room / gss_totals$hh_pop_sep_cook * 100
+  
+pct_electric_light <- gss_totals$light_source_elec / gss_totals$hh_pop_water_house * 100
+
+GSS_stats <- data.frame(
+  stat = c("total_households", "hh_size", "hh_size_rural", "hh_size_urban",
+           "pct_rural", "pct_LPG", "pct_CW", "pct_LPG_urban",
+           "pct_LPG_rural", "pct_borehole", "pct_sachet",
+           "pct_pipe_tap", "pct_rooms_two_plus",
+           "pct_sleeping_rooms_two_plus", "pct_separate_cooking",
+           "pct_electric_light"),
+  GSS = c(total_households, hh_size, hh_size_rural, hh_size_urban,
+          pct_rural, pct_LPG, pct_CW, pct_LPG_urban,
+          pct_LPG_rural, pct_borehole, pct_sachet,
+          pct_pipe_tap, pct_rooms_two_plus,
+          pct_sleeping_rooms_two_plus, pct_sepatate_cooking,
+          pct_electric_light)
+)
+```
+
+
+## Recalculating Linnea and Flavio's weights in R
+```{r, message=FALSE, warning=FALSE}
+LW_EA_weights <- GL_EA_weights %>%
+  select(!prob_1:weight_2010) %>% #remove weighting variables 
+  mutate(ea_select_prob = eas_selected/eas_2010, #Prob select the cluster (EA)
+         hh_select_within_ea_prob = 20/ea_hhs_2010) %>% #Prob select HH within each EA
+  mutate(hh_select_prob = ea_select_prob * hh_select_within_ea_prob) %>% #prob select HH 
+  mutate(weight = 1/hh_select_prob) #obtain weight
+```
+
+## Joining the demographic and cooking data 
+```{r, message=FALSE, warning=FALSE}
+#join the weights to the demographic data
+survey_with_weights <- left_join(demographics, LW_EA_weights, by = c("eacode", "region")) %>%
+  filter(!is.na(weight))
+
+#add the cooking data
+full_survey <- left_join(survey_with_weights, primary_secondary_cooking, by = "hh_id") %>%
+  
+  #add in house structure data
+  left_join(house_structure) %>%
+  
+  left_join(house_structure_random) %>%
+  
+  #add lighting data
+  left_join(lighting)
+```
+
+## Adding collapsed region and collapsd primary cooking type 
+```{r, message=FALSE, warning=FALSE}
+#collapse some of the regions and fuel types so there are enough in each group ----
+full_survey_collapsed <- full_survey %>%
+  
+  #collapse region
+  mutate(collapsed_region = case_when(
+  region %in% c("Ashanti", "Eastern") ~ "middle",
+  region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti", "Bono", "Bono East", "Ahafo") ~ "northern",
+  region %in% c("Greater Accra", "Volta") ~ "southeast",
+  region %in% c("Central", "Western", "Western North") ~ "southwest",
+  TRUE ~ region)) %>%
+  
+  #collapse fuel type
+  mutate(collapsed_fuel = case_when(
+    primary_cookstove == "Gas:(LPG)/cooking gas stove" ~ "LPG",
+    pstove_fuel == "Charcoal" ~ "charcoal",
+    pstove_fuel == "Wood/wood chips" ~ "wood",
+    TRUE ~ "none_other"
+  )) %>%
+  
+  #add house room indicators
+  mutate(rooms_two_plus = case_when(
+    house_rooms > 1 ~ "Yes",
+    TRUE ~ "No"
+  )) %>%
+  
+  #add sleeping rooms indicator 
+  mutate(sleeping_rooms_two_plus = case_when(
+    house_rooms_sleep > 1 ~ "Yes",
+    TRUE ~ "No"
+  )) %>%
+  
+  mutate(separate_cooking = case_when(
+    house_rooms_cooking > 0 ~ "Yes",
+    TRUE ~ "No"
+  ))
+```
+
+
+# POPULATION VALUES
+
+## National population totals 
+
+```{r, message=FALSE, warning=FALSE}
+### urban/rural total
+pop.urban_rural_str <-
+  data.frame(
+    urban_rural_str = c("urban", "rural"),
+    Freq = c(
+      subset(gss, region == "Total")$hh_pop_urban,
+      subset(gss, region == "Total")$hh_pop_rural
+    )
+  )
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+### primary fuel categories 
+
+hh_pop_tot <- subset(gss, region == "Total")$hh_pop
+
+frac_lpg <- subset(gss, region == "Total")$fuel_lpg / subset(gss, region == "Total")$hh_pop_fuel
+
+frac_char <- subset(gss, region == "Total")$fuel_char / subset(gss, region == "Total")$hh_pop_fuel
+
+frac_wood <- subset(gss, region == "Total")$fuel_wood / subset(gss, region == "Total")$hh_pop_fuel
+  
+
+pop.primary_fuel <-
+  data.frame(
+    collapsed_fuel = c("none_other", "wood", "LPG", "charcoal"),
+    Freq = c(
+      round((1 - (frac_lpg + frac_wood + frac_char)) * hh_pop_tot, 0),
+      round(frac_wood * hh_pop_tot, 0),
+      round(frac_lpg * hh_pop_tot, 0),
+      round(frac_char * hh_pop_tot, 0)
+    )
+  )
+```
+
+## Regional population totals 
+
+```{r, message=FALSE, warning=FALSE}
+### regional 2021 HH populations 
+gss_regional <- filter(gss, region != "Total") 
+
+pop.region_hh <- data.frame(
+  region = gss_regional$region,
+  Freq = gss_regional$hh_pop
+)
+```
+
+
+### regional main fuel
+```{r, message=FALSE, warning=FALSE}
+#specify known main fuel population values for each of the regions 
+pop.region_main_fuel <- gss_regional %>% 
+  mutate(none_other = fuel_none + fuel_other) %>%
+  rename(LPG = fuel_lpg, 
+         wood = fuel_wood, 
+         charcoal = fuel_char) %>%
+  select(region, none_other, wood, LPG, charcoal) %>%
+  
+  #apply scaling factor so population matches GSS total value
+  mutate(none_other = round(none_other * subset(gss, region == "Total")$hh_pop/subset(gss, region == "Total")$hh_pop_fuel, 0),
+         LPG = round(LPG * subset(gss, region == "Total")$hh_pop/subset(gss, region == "Total")$hh_pop_fuel,0),
+         wood = round(wood * subset(gss, region == "Total")$hh_pop/subset(gss, region == "Total")$hh_pop_fuel, 0),
+         charcoal = round(charcoal * subset(gss, region == "Total")$hh_pop/subset(gss, region == "Total")$hh_pop_fuel, 0))
+
+northern <- pop.region_main_fuel %>%
+  filter(region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti", "Bono", "Bono East", "Ahafo")) %>%
+  summarise(
+    region = "northern",
+    none_other = sum(none_other),
+    wood = sum(wood),
+    LPG = sum(LPG),
+    charcoal = sum(charcoal)
+  )
+
+
+middle <- pop.region_main_fuel %>%
+  filter(region %in% c("Ashanti", "Eastern")) %>%
+  summarise(
+    region = "middle",
+    none_other = sum(none_other),
+    wood = sum(wood),
+    LPG = sum(LPG),
+    charcoal = sum(charcoal)
+  )
+
+southeast <- pop.region_main_fuel %>%
+  filter(region %in% c("Greater Accra", "Volta")) %>%
+  summarise(
+    region = "southeast",
+    none_other = sum(none_other),
+    wood = sum(wood),
+    LPG = sum(LPG),
+    charcoal = sum(charcoal)
+  )
+
+southwest <- pop.region_main_fuel %>%
+  filter(region %in% c("Central", "Western", "Western North")) %>%
+  summarise(
+    region = "southwest",
+    none_other = sum(none_other),
+    wood = sum(wood),
+    LPG = sum(LPG),
+    charcoal = sum(charcoal)
+  )
+
+collapsed_region_primary_fuel <- bind_rows(northern, middle, southeast, southwest)
+
+
+#Combine primary fuel with each row specifying which is applicable 
+pop_region_primary_fuel_long <- collapsed_region_primary_fuel %>%
+  pivot_longer(cols = c(none_other, wood, LPG, charcoal), names_to = "collapsed_fuel", values_to = "Count") #names need to match what is in the survey!!
+
+# reformat this data so each row is a household (necessary for creating pop.table below)
+pop_region_primary_fuel_long <- pop_region_primary_fuel_long %>%
+  uncount(Count) %>%
+  rename(collapsed_region = region)
+
+#create table of LPG main stove by collapsed regions
+pop.table_primary_fuel <- xtabs(~collapsed_region+collapsed_fuel, pop_region_primary_fuel_long)
+```
+
+### regional urban/rural 
+```{r, message=FALSE, warning=FALSE}
+#regional 2021 HH populations 
+pop.region_urban_rural_hh <- gss_regional %>%
+  select(region, hh_pop_rural, hh_pop_urban) %>%
+  rename(rural = hh_pop_rural, 
+         urban = hh_pop_urban)
+
+
+northern <- pop.region_urban_rural_hh %>%
+  filter(region %in% c("Upper East", "Upper West", "North East", "Northern", "Savannah", "Oti", "Bono", "Bono East", "Ahafo")) %>%
+  summarise(
+    region = "northern",
+    urban = sum(urban),
+    rural = sum(rural)
+  )
+
+
+middle <- pop.region_urban_rural_hh %>%
+  filter(region %in% c("Ashanti", "Eastern")) %>%
+  summarise(
+    region = "middle",
+    urban = sum(urban),
+    rural = sum(rural)
+  )
+
+southeast <- pop.region_urban_rural_hh %>%
+  filter(region %in% c("Greater Accra", "Volta")) %>%
+  summarise(
+    region = "southeast",
+    urban = sum(urban),
+    rural = sum(rural)
+  )
+
+southwest <- pop.region_urban_rural_hh %>%
+  filter(region %in% c("Central", "Western", "Western North")) %>%
+  summarise(
+    region = "southwest",
+    urban = sum(urban),
+    rural = sum(rural)
+  )
+
+collapsed_region_urban_rural_hh <- bind_rows(northern, middle, southeast, southwest)
+
+
+#Combine LPG yes/no columns with each row specifying which is applicable 
+pop_region_urban_rural_long <- collapsed_region_urban_rural_hh %>%
+  pivot_longer(cols = c(rural, urban), names_to = "urban_rural_str", values_to = "Count") #names need to match what is in the survey!!
+
+# reformat this data so each row is a household (necessary for creating pop.table below)
+pop_region_urban_rural_long <- pop_region_urban_rural_long %>%
+  uncount(Count) %>%
+  rename(collapsed_region = region)
+
+#create table of LPG main stove by collapsed regions
+pop.table_urban_rural <- xtabs(~collapsed_region+urban_rural_str, pop_region_urban_rural_long)
+```
+
+
+# Setting up the initial survey design
+```{r, message=FALSE, warning=FALSE}
+#specify the initial survey design again
+survey_design <- svydesign(id=~eacode, #specify clusters
+                           weights= ~weight, #specify the survey weights
+                           strata= ~region, #specify the region strata
+                           data=full_survey_collapsed)
+```
+
+# LG + FM weights
+
+This is just the survey design specified above.
+
+# RAKE 1
+
+```{r, message=FALSE, warning=FALSE}
+raked_surv <- rake(survey_design, 
+                   list(~urban_rural_str, ~region), 
+                   list(pop.urban_rural_str, pop.region_hh)
+                   )
+
+upper_weight <- mean(weights(raked_surv, type = "sampling")) * 5
+
+rake1_design <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
+                                   strict = TRUE)
+```
+
+# RAKE 2
+
+```{r, message=FALSE, warning=FALSE}
+raked_surv <- rake(survey_design, 
+                   list(~urban_rural_str+collapsed_region), 
+                   list(pop.table_urban_rural)
+                   )
+
+upper_weight <- mean(weights(raked_surv, type = "sampling")) * 5
+
+rake2_design <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
+                                   strict = TRUE)
+```
+
+# RAKE 3
+
+```{r, message=FALSE, warning=FALSE}
+raked_surv <- rake(survey_design, list(~urban_rural_str, ~collapsed_fuel, ~region), list(pop.urban_rural_str, pop.primary_fuel, pop.region_hh), control = list(maxit = 20, epsilon = 1, verbose = FALSE))
+
+upper_weight <- mean(weights(raked_surv, type = "sampling")) * 5
+
+rake3_design <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
+                                   strict = TRUE)
+```
+
+
+# RAKE 4
+
+```{r, message=FALSE, warning=FALSE}
+raked_surv <- rake(survey_design, 
+                   list(~urban_rural_str+collapsed_region, ~collapsed_region+collapsed_fuel), 
+                   list(pop.table_urban_rural, pop.table_primary_fuel), control = list(maxit = 15, epsilon = 1))
+
+upper_weight <- mean(weights(raked_surv, type = "sampling")) * 5
+
+rake4_design <- trimWeights(raked_surv, lower=0.1, upper=upper_weight,
+                                   strict = TRUE)
+```
+
+
+# Combinging the results from all methods into a table
+
+```{r, message=FALSE, warning=FALSE}
+GL_FM <- calculate_survey_stats(survey_design, "GL_FM")
+
+rake1 <- calculate_survey_stats(rake1_design, "rake1")
+
+rake2 <- calculate_survey_stats(rake2_design, "rake2")
+
+rake3 <- calculate_survey_stats(rake3_design, "rake3")
+
+rake4 <- calculate_survey_stats(rake4_design, "rake4")
+
+
+high_level_results <- left_join(GSS_stats, GL_FM) %>%
+  left_join(rake1) %>%
+  left_join(rake2) %>%
+  left_join(rake3) %>%
+  left_join(rake4) %>%
+  mutate(rake1 = as.numeric(rake1),
+         rake2 = as.numeric(rake2),
+         rake3 = as.numeric(rake3),
+         rake4 = as.numeric(rake4)) %>%
+  filter(stat != "total_households")
+
+
+#create shaded table of high level results
+
+# Round GSS values to two decimal places
+high_level_results$GSS <- round(high_level_results$GSS, 2)
+
+# Calculate bounds with different methods for the first three rows and the rest
+high_level_results$lower_bound <- ifelse(1:nrow(high_level_results) <= 3, high_level_results$GSS * 0.95, high_level_results$GSS - 5)
+
+high_level_results$upper_bound <- ifelse(1:nrow(high_level_results) <= 3, high_level_results$GSS * 1.05, high_level_results$GSS + 5)
+
+# Create the datatable with custom JS for highlighting and hide lower and upper bound columns
+datatable(high_level_results, options = list(
+  rowCallback = JS("
+    function(row, data) {
+      for (var i = 2; i < data.length-2; i++) {
+        var lowerBound = parseFloat(data[data.length-2]);
+        var upperBound = parseFloat(data[data.length-1]);
+        var cellValue = parseFloat(data[i]);
+        if (cellValue < lowerBound || cellValue > upperBound) {
+          $('td:eq('+i+')', row).css('background-color', '#ff9999');
+        }
+      }
+    }"
+  ),
+  columnDefs = list(list(visible = FALSE, targets = c(ncol(high_level_results)-1, ncol(high_level_results))))
+))
+```
+
+# RMSE of high level results
+
+```{r, message=FALSE, warning=FALSE}
+#graphing MSE for main stats
+high_level_results %>%
+  
+  filter(stat != "pct_rooms_two_plus") %>% #removing because this variable feels like something was measured differently 
+  
+  mutate(GL_FM = as.numeric(GL_FM)) %>%
+  mutate(GL_FM_rmse = sqrt((GSS - GL_FM)^2),
+         rake1_rmse = sqrt((GSS - rake1)^2),
+         rake2_rmse = sqrt((GSS - rake2)^2),
+         rake3_rmse = sqrt((GSS - rake3)^2),
+         rake4_rmse = sqrt((GSS - rake4)^2)) %>%
+  
+  summarize(GL_FM_tot_rmse = sum(GL_FM_rmse),
+            rake1_tot_rmse = sum(rake1_rmse),
+            rake2_tot_rmse = sum(rake2_rmse),
+            rake3_tot_rmse = sum(rake3_rmse),
+            rake4_tot_rmse = sum(rake4_rmse)) %>%
+  
+  pivot_longer(cols = contains("rmse"), 
+               names_to = "Method", 
+               values_to = "RMSE") %>%
+  
+  ggplot(aes(x = Method, y = RMSE)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(
+    title = "Total Root Mean Squared Error (RMSE) for main stats",
+    x = "Weighting Method",
+    y = "Total RMSE"
+  ) +
+  theme_minimal()
+
+
+# graph RMSE for main stats excluding raked variables
+high_level_results %>%
+  
+  filter(stat != "pct_rooms_two_plus") %>% #removing because this variable feels like something was measured differently 
+  
+  filter(!(stat %in% c("pct_rural", "pct_LPG", "pct_CW", "pct_LPG_urban", "pct_LPG_rural"))) %>%
+  
+  mutate(GL_FM = as.numeric(GL_FM)) %>%
+  mutate(GL_FM_rmse = sqrt((GSS - GL_FM)^2),
+         rake1_rmse = sqrt((GSS - rake1)^2),
+         rake2_rmse = sqrt((GSS - rake2)^2),
+         rake3_rmse = sqrt((GSS - rake3)^2),
+         rake4_rmse = sqrt((GSS - rake4)^2)) %>%
+  
+  summarize(GL_FM_tot_rmse = sum(GL_FM_rmse),
+            rake1_tot_rmse = sum(rake1_rmse),
+            rake2_tot_rmse = sum(rake2_rmse),
+            rake3_tot_rmse = sum(rake3_rmse),
+            rake4_tot_rmse = sum(rake4_rmse)) %>%
+  
+  pivot_longer(cols = contains("rmse"), 
+               names_to = "Method", 
+               values_to = "RMSE") %>%
+  
+  ggplot(aes(x = Method, y = RMSE)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(
+    title = "Total Root Mean Squared Error (RMSE) for main stats (excluding raked variables)",
+    x = "Weighting Method",
+    y = "Total RMSE"
+  ) +
+  theme_minimal()
+```
+
+
+# Regional results for main fuel = LPG
+
+```{r, message=FALSE, warning=FALSE}
+# Sort the 'region' vector in alphabetical order
+gss_regional <- gss_regional %>% arrange(region)
+
+
+regions <- gss_regional$region
+
+
+final_table <- data.frame(Region = regions)
+
+raking_methods <- list(survey_design, 
+                       rake1_design, 
+                       rake2_design, 
+                       rake3_design, 
+                       rake4_design) 
+
+region_coefs_list <- list(region_coefs_GL_FM,
+                          region_coefs_rake1, 
+                          region_coefs_rake2, 
+                          region_coefs_rake3, 
+                          region_coefs_rake4)
+
+raking_method_names <- list("GL_FM", "rake1", "rake2", "rake3", "rake4")
+
+for (i in seq_along(raking_methods)) {
+  raking_option <- raking_method_names[[i]]
+  final_table[[raking_option]] <- calculate_region_pct_LPG(raking_methods[[i]], regions, region_coefs_list[[i]])
+}
+
+
+#add in GSS value
+gss_main_lpg_regional <- gss_regional %>%
+  mutate(gss_lpg = round(fuel_lpg / hh_pop_fuel * 100, 1)) %>%
+  select(region, gss_lpg)
+
+
+full_region_lpg <- left_join(gss_main_lpg_regional, final_table, by = c("region" = "Region"))
+
+# Calculate +/- 5% bounds for each value in the gss_lpg column
+full_region_lpg$lower_bound <- full_region_lpg$gss_lpg - 5
+full_region_lpg$upper_bound <- full_region_lpg$gss_lpg + 5
+
+# Create the datatable with custom JS for highlighting
+datatable(full_region_lpg, options = list(
+  rowCallback = JS("
+    function(row, data) {
+      // Assuming gss_lpg is in the second column, and comparisons start from the third column
+      for (var i = 2; i < data.length-2; i++) {
+        var lowerBound = parseFloat(data[data.length-2]);
+        var upperBound = parseFloat(data[data.length-1]);
+        var cellValue = parseFloat(data[i]);
+        if (cellValue < lowerBound || cellValue > upperBound) {
+          $('td:eq('+i+')', row).css('background-color', '#ff9999');
+        }
+      }
+    }"
+  ),
+  columnDefs = list(list(visible = FALSE, targets = c(ncol(full_region_lpg)-1, ncol(full_region_lpg))))
+))
+```
+
+
+# RMSE for regional results of main fuel = LPG
+```{r, message=FALSE, warning=FALSE}
+full_region_lpg %>% 
+  mutate(GL_FM_rmse = sqrt((gss_lpg - GL_FM)^2),
+         rake1_rmse = sqrt((gss_lpg - rake1)^2),
+         rake2_rmse = sqrt((gss_lpg - rake2)^2),
+         rake3_rmse = sqrt((gss_lpg - rake3)^2),
+         rake4_rmse = sqrt((gss_lpg - rake4)^2)) %>%
+  
+  summarize(GL_FM_tot_rmse = sum(GL_FM_rmse),
+            rake1_tot_rmse = sum(rake1_rmse),
+            rake2_tot_rmse = sum(rake2_rmse),
+            rake3_tot_rmse = sum(rake3_rmse),
+            rake4_tot_rmse = sum(rake4_rmse)) %>%
+  
+  pivot_longer(cols = contains("rmse"), 
+               names_to = "Method", 
+               values_to = "RMSE") %>%
+  
+  ggplot(aes(x = Method, y = RMSE)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(
+    title = "Total Root Mean Squared Error (RMSE) for regional main fuel = LPG",
+    x = "Weighting Method",
+    y = "Total RMSE"
+  ) +
+  theme_minimal()
+```
+
+
+
