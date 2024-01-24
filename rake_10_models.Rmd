@@ -25,19 +25,24 @@ if (Sys.getenv('USER') == "lewiswhite") {
   setwd("/Users/lewiswhite/CHAP_columbia/CHAP_survey_weights")
   
   #includes the weights from Linnea and Flavio's V4 weights 
-  GL_EA_weights <- read_csv("weight_2010_full_results.csv")
+  GL_EA_weights <- read_csv("data/weight_2010_full_results.csv")
   
   #responses to the survey
-  demographics <- read_csv("Demographics dataset.csv")
+  demographics <- read_csv("data/Demographics dataset.csv")
   
   #cooking survey
-  primary_secondary_cooking <- read_csv("Primary and secondary cooking practices dataset.csv")
+  primary_secondary_cooking <- read_csv("data/Primary and secondary cooking practices dataset.csv")
   
   #house structure
-  house_structure <- read_csv("House structure (non randomized).csv")
+  house_structure <- read_csv("data/House structure (non randomized).csv")
+  
+  house_structure_random <- read_csv("data/House structure (randomized).csv")
+  
+  #lighting 
+  lighting <- read_csv("data/Lighting.csv")
   
   #GSS-2021
-  gss <- read_excel("gss_2021.xlsx")
+  gss <- read_excel("data/gss_2021.xlsx")
      
 }
 
@@ -50,6 +55,10 @@ if (Sys.getenv('USER') == "linneagraham") {
   demographics <- read_csv(file.path(ROOT, "Public Use Dataset/Modules/Demographics dataset.csv"))
   primary_secondary_cooking <- read_csv(file.path(ROOT,"Public Use Dataset/Modules/Primary and secondary cooking practices dataset.csv"))
   house_structure <- read_csv(file.path(ROOT, "Public Use Dataset/Modules/House structure (non randomized).csv"))
+  
+  house_structure_random <- read_csv(file.path(ROOT, "Public Use Dataset/Modules/House structure (randomized).csv"))
+  
+  lighting <- read_csv(file.path(ROOT, "Public Use Dataset/Modules/Lighting.csv"))
 
   gss <- read_excel(file.path(ROOT, "Survey Weights/input/gss_2021.xlsx"))
 }
@@ -86,7 +95,12 @@ full_survey <- left_join(survey_with_weights, primary_secondary_cooking, by = "h
          CW_main = coalesce(CW_main, "No")) %>%
   
   #add in house structure data
-  left_join(house_structure)
+  left_join(house_structure) %>%
+  
+  left_join(house_structure_random) %>%
+  
+  #add lighting data
+  left_join(lighting)
 
 
 ```
@@ -111,7 +125,26 @@ full_survey_collapsed <- full_survey %>%
     primary_cookstove == "3-stone stove/open fire" ~ "wood",
     is.na(primary_cookstove) ~ "none_other",
     TRUE ~ "none_other"
+  )) %>%
+  
+  #add house room indicators
+  mutate(rooms_two_plus = case_when(
+    house_rooms > 1 ~ "Yes",
+    TRUE ~ "No"
+  )) %>%
+  
+  #add sleeping rooms indicator 
+  mutate(sleeping_rooms_two_plus = case_when(
+    house_rooms_sleep > 1 ~ "Yes",
+    TRUE ~ "No"
+  )) %>%
+  
+  mutate(separate_cooking = case_when(
+    house_rooms_cooking > 0 ~ "Yes",
+    TRUE ~ "No"
   ))
+
+
 ```
 
 
@@ -510,7 +543,25 @@ for (i in seq_along(regions)){
   #print the result for each
   print(region_pct_lpg)
 }
+
+
+survey::svytotal(c(rep(1, nrow(full_survey))), survey_design)
+
+#check out house rooms
+svytotal(~rooms_two_plus, design = survey_design)
+confint(svytotal(~rooms_two_plus, design = survey_design))
+
+svytotal(~sleeping_rooms_two_plus, design = survey_design)
+confint(svytotal(~sleeping_rooms_two_plus, design = survey_design))
+
+svytotal(~separate_cooking, design = survey_design)
+confint(svytotal(~separate_cooking, design = survey_design))
+
+#check out lighting 
+svytotal(~light_source_main, design = survey_design, na.rm = TRUE)
+confint(svytotal(~light_source_main, design = survey_design, na.rm = TRUE))
 ```
+
 
 
 # RAKE 1
@@ -900,6 +951,20 @@ svytotal(~hh_water_source, design = trimmed_raked_surv, na.rm = TRUE)
 
 svymean(~house_rooms, design = trimmed_raked_surv, na.rm = TRUE)
 
+#check out house rooms
+svytotal(~rooms_three_plus, design = trimmed_raked_surv)
+
+svytotal(~sleeping_rooms_two_plus, design = trimmed_raked_surv)
+
+svytotal(~separate_cooking, design = trimmed_raked_surv)
+
+#check out lighting 
+svytotal(~light_source_main, design = trimmed_raked_surv, na.rm = TRUE)
+
+
+
+
+
 ```
 
 ## loop to find main fuel counts 
@@ -1041,6 +1106,16 @@ svytotal(~hh_water_source, design = survey_design, na.rm = TRUE)
 
 svymean(~house_rooms, design = trimmed_raked_surv, na.rm = TRUE)
 svymean(~house_rooms, design = survey_design, na.rm = TRUE)
+
+#check out house rooms
+svytotal(~rooms_two_plus, design = trimmed_raked_surv)
+
+svytotal(~sleeping_rooms_two_plus, design = trimmed_raked_surv)
+
+svytotal(~separate_cooking, design = trimmed_raked_surv)
+
+#check out lighting 
+svytotal(~light_source_main, design = trimmed_raked_surv, na.rm = TRUE)
 ```
 
 ## loop to find main fuel counts 
@@ -1076,6 +1151,45 @@ for (i in seq_along(regions)){
   print(region_pct_lpg)
 }
 ```
+
+## Chi Square tests
+```{r}
+rake_lpg <- svytable(~collapsed_fuel+region, raked_surv) %>%
+  as.data.frame() %>% 
+  filter(collapsed_fuel == "LPG") %>%
+  select(region, Freq) %>%
+  rename(rake_lpg = Freq)
+
+gss_lpg <- gss %>% select(region, fuel_lpg) %>%
+  filter(region != "Total") %>%
+  arrange(region) %>%
+  rename(gss_lpg = fuel_lpg)
+
+expected_props = gss_lpg$gss_lpg / sum(gss_lpg$gss_lpg)
+observed_counts = rake_lpg$rake_lpg
+
+# Perform chi-squared test
+chisq.test(observed_counts, p = expected_props) # p < 2.2e-16
+
+
+rake_urban <- svytable(~urban_rural_str+region, raked_surv) %>%
+  as.data.frame() %>%
+  filter(urban_rural_str == "urban") %>%
+  select(region, Freq)
+
+gss_urban <- gss %>% select(region, hh_pop_urban) %>%
+  filter(region != "Total") %>%
+  arrange(region)
+
+expected_props = gss_urban$hh_pop_urban / sum(gss_urban$hh_pop_urban)
+observed_counts = rake_urban$Freq
+
+# Perform chi-squared test
+chisq.test(observed_counts, p = expected_props) # p < 2.2e-16
+
+```
+
+
 
 
 ## Examine new weights from Rake 5b
@@ -1185,6 +1299,16 @@ svytotal(~collapsed_fuel, design = ashanti_sub, na.rm = TRUE)
 svytotal(~hh_water_source, design = trimmed_raked_surv, na.rm = TRUE)
 
 svymean(~house_rooms, design = trimmed_raked_surv, na.rm = TRUE)
+
+#check out house rooms
+svytotal(~rooms_two_plus, design = trimmed_raked_surv)
+
+svytotal(~sleeping_rooms_two_plus, design = trimmed_raked_surv)
+
+svytotal(~separate_cooking, design = trimmed_raked_surv)
+
+#check out lighting 
+svytotal(~light_source_main, design = trimmed_raked_surv, na.rm = TRUE)
 ```
 
 ## loop to find main fuel counts 
@@ -1326,6 +1450,16 @@ svytotal(~collapsed_fuel, design = ashanti_sub, na.rm = TRUE)
 svytotal(~hh_water_source, design = trimmed_raked_surv, na.rm = TRUE)
 
 svymean(~house_rooms, design = trimmed_raked_surv, na.rm = TRUE)
+
+#check out house rooms
+svytotal(~rooms_two_plus, design = trimmed_raked_surv)
+
+svytotal(~sleeping_rooms_two_plus, design = trimmed_raked_surv)
+
+svytotal(~separate_cooking, design = trimmed_raked_surv)
+
+#check out lighting 
+svytotal(~light_source_main, design = trimmed_raked_surv, na.rm = TRUE)
 ```
 
 ## loop to find main fuel counts 
@@ -1469,6 +1603,16 @@ svytotal(~collapsed_fuel, design = accra_sub, na.rm = TRUE)
 #Ashanti LPG
 ashanti_sub <- subset(trimmed_raked_surv, region == "Ashanti")
 svytotal(~collapsed_fuel, design = ashanti_sub, na.rm = TRUE)
+
+#check out house rooms
+svytotal(~rooms_two_plus, design = survey_design)
+
+svytotal(~sleeping_rooms_two_plus, design = survey_design)
+
+svytotal(~separate_cooking, design = survey_design)
+
+#check out lighting 
+svytotal(~light_source_main, design = survey_design, na.rm = TRUE)
 ```
 
 ## Examine new weights from Rake 9

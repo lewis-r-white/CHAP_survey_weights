@@ -34,24 +34,24 @@ if (Sys.getenv('USER') == "lewiswhite") {
   setwd("/Users/lewiswhite/CHAP_columbia/CHAP_survey_weights")
   
   #includes the weights from Linnea and Flavio's V4 weights 
-  GL_EA_weights <- read_csv("weight_2010_full_results.csv")
+  GL_EA_weights <- read_csv("data/weight_2010_full_results.csv")
   
   #responses to the survey
-  demographics <- read_csv("Demographics dataset.csv")
+  demographics <- read_csv("data/Demographics dataset.csv")
   
   #cooking survey
-  primary_secondary_cooking <- read_csv("Primary and secondary cooking practices dataset.csv")
+  primary_secondary_cooking <- read_csv("data/Primary and secondary cooking practices dataset.csv")
   
   #house structure
-  house_structure <- read_csv("House structure (non randomized).csv")
+  house_structure <- read_csv("data/House structure (non randomized).csv")
   
-  house_structure_random <- read_csv("House structure (randomized).csv")
+  house_structure_random <- read_csv("data/House structure (randomized).csv")
   
   #lighting 
-  lighting <- read_csv("Lighting.csv")
+  lighting <- read_csv("data/Lighting.csv")
   
   #GSS-2021
-  gss <- read_excel("gss_2021.xlsx")
+  gss <- read_excel("data/gss_2021.xlsx")
      
 }
 
